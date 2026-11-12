@@ -1,0 +1,3 @@
+@import url("../css/style.css");
+
+body[data-admin-page="system"] .auth { width: min(100%, 720px); }

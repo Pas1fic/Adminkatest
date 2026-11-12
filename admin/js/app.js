@@ -16,29 +16,49 @@ const ask=m=>new Promise(r=>{const d=dlg(h('h3',{},'Подтвердите де�
  h('button',{class:'btn t',onclick:()=>d.close()},'Отмена'),h('button',{class:'btn',onclick:()=>{r(true);d.close()}},'Подтвердить')));
  d.addEventListener('close',()=>r(false))});
 function fail(e){e.code==401?expire():toast(e.message||'Ошибка')}
-function expire(){clearInterval(tm);API.logout();login('Сессия завершена: 30 минут без действий. Войдите снова.')}
+async function expire(){clearInterval(tm);try{await API.logout()}catch(e){toast(e.message)}login('Сессия завершена или сервер недоступен. Войдите снова.')}
 
 function formDlg(title,fields,labels,vals,ok){
- const ins={};
+ const ins={},required=Object.keys(vals).length===0;
  const rows=Object.entries(fields).map(([k,t])=>{let el;
   if(Array.isArray(t)){el=h('select',{},t.map(o=>h('option',{},o)));el.value=vals[k]??t[0]}
   else if(t=='bool'){el=h('input',{type:'checkbox'});el.checked=!!vals[k]}
-  else if(t=='area'){el=h('textarea',{rows:4,required:true});el.value=vals[k]??''}
-  else{el=h('input',{type:t||'text',required:true});el.value=vals[k]??''}
-  ins[k]=el;return h('label',{class:'f'},h('span',{},labels[k]),el)});
- const d=dlg(h('form',{method:'dialog',onsubmit:async e=>{e.preventDefault();const p={};
-  for(const k in ins){const t=fields[k],v=ins[k];p[k]=t=='bool'?v.checked:t=='number'?Number(v.value):v.value.trim()}
-  if(await ok(p)!==false)d.close()}},h('h3',{},title),rows,
+  else if(t=='area'){el=h('textarea',{rows:4,required});el.value=vals[k]??''}
+  else if(t=='image'){el=h('input',{type:'file',accept:'image/*'});}
+  else{el=h('input',{type:t||'text',required});el.value=vals[k]??''}
+  const fieldLabel=labels[k]||({image_data:'Изображение (уменьшится и сохранится в Base64)',
+   password:'Пароль администратора',sections:'Разрешённые разделы через запятую'}[k]||k);
+  ins[k]=el;return h('label',{class:'f'},h('span',{},fieldLabel),el)});
+ const errorMessage=h('p',{class:'er','aria-live':'polite'});
+ const d=dlg(h('form',{method:'dialog',onsubmit:async e=>{e.preventDefault();errorMessage.textContent='';
+  try{const p={};
+   for(const k in ins){const t=fields[k],v=ins[k];
+    if(t=='bool')p[k]=v.checked;
+    else if(t=='number')p[k]=Number(v.value);
+    else if(t=='image'&&v.files[0])p[k]=await resizeImage(v.files[0]);
+    else if(t!='image')p[k]=v.value.trim()}
+   if(await ok(p)!==false)d.close()
+  }catch(error){errorMessage.textContent=error.message||'Не удалось сохранить данные.'}
+ }},h('h3',{},title),rows,errorMessage,
   h('div',{class:'row'},h('button',{type:'button',class:'btn t',onclick:()=>d.close()},'Отмена'),h('button',{class:'btn'},'Сохранить'))));
 }
+function resizeImage(file){return new Promise((resolve,reject)=>{
+ const reader=new FileReader();reader.onerror=()=>reject(new Error('Не удалось прочитать изображение.'));
+ reader.onload=()=>{const image=new Image();image.onerror=()=>reject(new Error('Некорректное изображение.'));
+  image.onload=()=>{const scale=Math.min(1,1600/image.width,1600/image.height),canvas=document.createElement('canvas');
+   canvas.width=Math.max(1,Math.round(image.width*scale));canvas.height=Math.max(1,Math.round(image.height*scale));
+   canvas.getContext('2d').drawImage(image,0,0,canvas.width,canvas.height);resolve(canvas.toDataURL('image/jpeg',.82))};
+  image.src=reader.result};
+ reader.readAsDataURL(file)
+})}
 
 function shell(title,body,back=true){
  const tmr=h('span',{class:'tm',title:'До автоматического выхода'});
  const tick=()=>{const s=API.left();if(s<=0)return expire();tmr.textContent='⏱ '+Math.floor(s/60)+':'+String(s%60).padStart(2,'0')};
  clearInterval(tm);tm=setInterval(tick,1000);tick();
- $.replaceChildren(h('header',{class:'top'},back&&h('button',{class:'btn t',onclick:menu},'← В меню'),h('b',{class:'ttl'},title),h('span',{class:'sp'}),tmr,
+ $.replaceChildren(h('header',{class:'top'},back&&h('button',{class:'btn t',onclick:pageMenu},'← В меню'),h('b',{class:'ttl'},title),h('span',{class:'sp'}),tmr,
   h('button',{class:'ib',title:'Светлая / тёмная тема','aria-label':'Сменить тему',onclick:theme},'◐'),
-  h('button',{class:'btn t',onclick:()=>{clearInterval(tm);API.logout();login()}},'Выйти')),h('main',{},body));
+  h('button',{class:'btn t',onclick:async()=>{clearInterval(tm);try{await API.logout()}catch(e){toast(e.message)}login()}},'Выйти')),h('main',{},body));
 }
 
 /* ---------- Вход ---------- */
@@ -58,15 +78,64 @@ function authCard(title,note,fields,onok,hint){
 }
 function login(note){clearInterval(tm);
  const u=h('input',{required:true,autocomplete:'username','data-l':'Логин'}),p=h('input',{type:'password',required:true,autocomplete:'current-password','data-l':'Пароль'});
- authCard('Вход',note,[u,p],async(l,pw)=>{await API.login(l,pw);code()},'Демо: super / Super#Pass12345 или moder / Moder#Pass12345');
+ authCard('Вход',note,[u,p],async(l,pw)=>{await API.login(l,pw);code()},'Введите учётные данные администратора.');
 }
 function code(){const c=h('input',{required:true,inputmode:'numeric',autocomplete:'one-time-code','data-l':'Код из письма'});
- authCard('Подтверждение',0,[c],async v=>{await API.verify(v);menu()},'Демо-код: 000000')}
+ authCard('Подтверждение',0,[c],async v=>{await API.verify(v);route()},'В режиме разработки код выводится в консоль сервера.')}
 
 /* ---------- Меню и разделы ---------- */
-function menu(){shell('Меню · '+API.me().login,h('div',{class:'tiles'},Object.entries(SEC).filter(([k])=>API.can(k)).map(([k,s])=>
- h('button',{class:'tile',onclick:()=>open(k)},h('span',{class:'ic'},s.i),s.t))),false)}
-function open(k){const box=h('div');shell(SEC[k].t,box);({bulk,assistant,profit,stats,scan}[k]||listView)(k,box)}
+const GROUPS=[
+ {t:'Поддержка',i:'🎧',d:'Обращения пользователей и жалобы',page:'support',items:['support','complaints']},
+ {t:'Информация обо всём',i:'🧭',d:'Пользователи, лоты и магазины',page:'info',items:['users','lots','shops']},
+ {t:'Добавление контента',i:'✨',d:'Баннеры, новости и курсы валют',page:'content',items:['banners','news','currencies']}
+];
+const ADMIN_HOME=['users','lots','news','complaints','support','shops'];
+const MODULE_PAGES={promotion:'finance',profit:'finance',refunds:'finance',stats:'analytics',transactions:'analytics',
+ newsletter:'system',journal:'system',admins:'system',scan:'system',bulk:'system',assistant:'system'};
+function moduleTiles(keys){return h('div',{class:'tiles'},keys.filter(k=>API.can(k)).map(k=>{
+ const s=SEC[k];return h('button',{class:'tile',onclick:()=>location.href='/admin/'+(GROUPS.find(g=>g.items.includes(k))?.page||MODULE_PAGES[k]||'')+'/index.html?module='+encodeURIComponent(k)},h('span',{class:'ic'},s.i),s.t)
+}))}
+function menu(){
+ if(API.me().role!=='super')return shell('Меню · '+API.me().login,moduleTiles(ADMIN_HOME),false);
+ const grouped=new Set(GROUPS.flatMap(g=>g.items));
+ const groups=GROUPS.map(g=>h('button',{class:'tile group-tile',onclick:()=>location.href='/admin/'+g.page+'/index.html'},
+  h('span',{class:'ic'},g.i),h('span',{class:'group-copy'},h('b',{},g.t),h('small',{},g.d))));
+ const other=Object.keys(SEC).filter(k=>!grouped.has(k)&&k!=='refunds'&&API.can(k));
+ const locked=h('button',{class:'tile disabled-tile',disabled:true,title:'Раздел временно неактивен'},
+  h('span',{class:'ic'},SEC.refunds.i),h('span',{},SEC.refunds.t),h('small',{},'Временно неактивно'));
+ shell('Меню · '+API.me().login,h('div',{class:'menu-groups'},h('div',{class:'tiles'},groups),
+  h('h2',{class:'section-title'},'Инструменты администратора'),
+  h('div',{class:'tiles'},[...moduleTiles(other).children,locked])),false)
+}
+function pageMenu(){if(document.body.dataset.adminPage){route()}else menu()}
+function route(){
+ const page=document.body.dataset.adminPage;
+ if(!page)return menu();
+ const group=GROUPS.find(item=>item.page===page),config=window.ADMIN_PAGE_CONFIG||{};
+ const keys=config.modules||group?.items||({
+  finance:['promotion','profit','refunds'],
+  analytics:['stats','transactions'],
+  system:['newsletter','journal','admins','scan','bulk','assistant']
+ }[page]||[]);
+ const selected=new URLSearchParams(location.search).get('module');
+ if(selected&&keys.includes(selected)&&API.can(selected))return open(selected);
+ const available=keys.filter(k=>API.can(k)||k==='refunds');
+ const tiles=moduleTiles(available.filter(k=>k!=='refunds'));
+ if(available.includes('refunds'))tiles.append(h('button',{class:'tile disabled-tile',disabled:true},
+  h('span',{class:'ic'},SEC.refunds.i),h('span',{},SEC.refunds.t),h('small',{},'Временно неактивно')));
+ shell(config.title||group?.t||({finance:'Финансы',analytics:'Аналитика',system:'Администрирование'}[page]||'Меню'),
+  h('div',{},(config.description||group?.d)&&h('p',{class:'group-lead mt'},config.description||group.d),tiles),true)
+}
+function open(k){
+ if(k==='profit')return unlockProfit();
+ const box=h('div');shell(SEC[k].t,box);({bulk,assistant,profit,stats,scan,newsletter}[k]||listView)(k,box)
+}
+async function unlockProfit(){
+ formDlg('Подтвердите пароль',{password:'password'},{password:'Пароль'}, {},async data=>{
+  try{await API.reauthenticate(data.password);const box=h('div');shell(SEC.profit.t,box);profit('profit',box)}
+  catch(e){if(e.message.includes('Сессия'))fail(e);else toast(e.message);return false}
+ })
+}
 
 const GOOD=/^(active|done|accepted)$/,BAD=/^(blocked|rejected|new|pending)$/;
 const cell=v=>typeof v=='boolean'?(v?'✓':'—'):typeof v=='string'&&(GOOD.test(v)||BAD.test(v))?h('span',{class:'bd '+(GOOD.test(v)?'ok':'bad')},v):v;
@@ -77,20 +146,27 @@ function listView(k,box){
  const load=async()=>{try{draw(await API.list(co,{...d,dk:s.dk}))}catch(e){fail(e)}};
  const btn=(t,on,fn)=>h('button',{class:'btn t',disabled:!on,onclick:fn},t);
  const edit=r=>formDlg('Запись #'+r.id,s.e,s.c,r,async p=>{try{await API.save(co,r.id,p);toast('Сохранено');load()}catch(e){fail(e);return false}});
+ const detail=r=>{if(k==='users')userDetail(r);else edit(r)};
  const run=(label,r,fn)=>async()=>{if(await ask(label+' · запись #'+r.id+'?'))try{await fn();toast('Готово');load()}catch(e){fail(e)}};
- const draw=r=>{const cols=Object.keys(s.c),has=s.act||s.del;d.page=Math.min(d.page,r.pages);
+ const draw=r=>{const cols=Object.keys(s.c),has=s.act||s.del||s.logs;d.page=Math.min(d.page,r.pages);
   tw.replaceChildren(h('table',{},h('thead',{},h('tr',{},cols.map(c=>h('th',{},s.c[c])),has&&h('th',{},''))),
-   h('tbody',{},r.rows.length?r.rows.map(r=>h('tr',{class:s.e?'cl':'',onclick:s.e&&(()=>edit(r))},cols.map(c=>h('td',{},cell(r[c]))),
+   h('tbody',{},r.rows.length?r.rows.map(r=>h('tr',{class:s.e||k=='users'?'cl':'',onclick:(s.e||k=='users')&&(()=>detail(r))},cols.map(c=>h('td',{},cell(r[c]))),
     has&&h('td',{onclick:e=>e.stopPropagation()},(s.act||[]).map(([a,l])=>h('button',{class:'btn t sm',onclick:run(l,r,()=>API.act(co,r.id,a))},l)),
-     s.del&&h('button',{class:'btn t sm',onclick:run('Удалить',r,()=>API.del(co,r.id))},'Удалить')))):
+     s.del&&h('button',{class:'btn t sm',onclick:run('Удалить',r,()=>API.del(co,r.id))},'Удалить'),
+     s.logs&&h('button',{class:'btn t sm',onclick:()=>API.downloadAdminLog(r.id).catch(fail)},'TXT')))):
     h('tr',{},h('td',{colspan:cols.length+1},'Ничего не найдено. Измените поиск или фильтры.')))));
   pg.replaceChildren(btn('←',d.page>1,()=>{d.page--;load()}),h('span',{},`стр. ${d.page} из ${r.pages} · всего ${r.total}`),btn('→',d.page<r.pages,()=>{d.page++;load()}))};
+ if(k==='users'){
+  d.field=d.field||'nick';
+  const field=h('select',{'aria-label':'Искать по'},[['nick','Никнейму'],['email','Почте'],['id','ID пользователя'],['shop','Магазину']].map(([v,l])=>h('option',{value:v},l)));
+  field.value=d.field;field.onchange=()=>{d.field=field.value;d.page=1;load()};bar.append(field)
+ }
  if(s.q){const q=h('input',{type:'search',placeholder:'Поиск: '+s.q,'aria-label':'Поиск'});q.value=d.q;let t;
   q.oninput=()=>{clearTimeout(t);t=setTimeout(()=>{d.q=q.value;d.page=1;load()},250)};bar.append(q)}
  for(const[fk,o]of Object.entries(s.f||{})){const f=h('select',{'aria-label':s.c[fk]},h('option',{value:''},s.c[fk]+': все'),o.map(v=>h('option',{},v)));
   f.value=d.f[fk]||'';f.onchange=()=>{d.f[fk]=f.value;d.page=1;load()};bar.append(f)}
  if(s.dk){const f=h('input',{type:'date','aria-label':'С даты',title:'С даты'});f.value=d.from;f.onchange=()=>{d.from=f.value;d.page=1;load()};bar.append(f)}
- if(s.a)bar.append(h('button',{class:'btn',onclick:()=>formDlg('Добавить',s.a,s.c,{},async p=>{try{await API.add(co,p);toast('Добавлено');load()}catch(e){fail(e);return false}})},'+ Добавить'));
+ if(s.a)bar.append(h('button',{class:'btn',onclick:()=>formDlg('Добавить',s.a,s.c,k==='admins'?{sections:ADMIN_HOME.join(',')}:{},async p=>{try{await API.add(co,p);toast('Добавлено');load()}catch(e){fail(e);return false}})},'+ Добавить'));
  if(s.x)bar.append(h('button',{class:'btn t',onclick:async()=>{try{const{rows}=await API.list(co,{...d,all:true,dk:s.dk}),cols=Object.keys(s.c);
   const csv=[cols.map(c=>s.c[c]),...rows.map(r=>cols.map(c=>r[c]))].map(r=>r.map(v=>'"'+String(v).replaceAll('"','""')+'"').join(',')).join('\n');
   const a=h('a',{href:URL.createObjectURL(new Blob(['\ufeff'+csv],{type:'text/csv'})),download:co+'.csv'});a.click();URL.revokeObjectURL(a.href)}catch(e){fail(e)}}},'Экспорт CSV'));
@@ -99,13 +175,49 @@ function listView(k,box){
 
 /* ---------- Особые разделы ---------- */
 async function stats(k,box){try{const r=await API.stats();
- box.append(h('p',{class:'mt'},'Данные обновляются '+r.upd+', а не при каждом открытии.'),h('div',{class:'cards'},r.items.map(([l,v])=>h('div',{class:'card st'},h('b',{},v),h('span',{},l)))))}catch(e){fail(e)}}
+ const max=Math.max(1,...r.items.map(([,v])=>Number(v)||0));
+ box.append(h('p',{class:'mt'},'Показатели рассчитаны по данным, подключённым к этой демо-базе.'),h('div',{class:'cards'},r.items.map(([l,v])=>h('div',{class:'card st'},h('b',{},v),h('span',{},l),
+  h('progress',{class:'stat-progress',max,value:Number(v)||0,'aria-label':l}))))) }catch(e){fail(e)}}
 
-async function profit(k,box){const d=st.d.profit??={p:'Дни'},out=h('div');
- box.append(h('div',{class:'bar'},['Дни','Недели','Месяцы'].map(p=>h('button',{class:'btn'+(p==d.p?'':' t'),onclick:()=>{d.p=p;box.replaceChildren();profit(k,box)}},p))),out);
- try{const r=await API.profit(d.p),m=Math.max(...r.rows.map(x=>x[1]));
-  out.append(h('div',{class:'card st'},h('b',{},r.total),h('span',{},'Прибыль за период')),
-   h('div',{class:'card chart'},r.rows.map(([l,v])=>{const i=h('i');i.style.height=v/m*80+'%';return h('div',{class:'col'},v,i,l)})))}catch(e){fail(e)}}
+async function profit(k,box){try{const r=await API.profit();
+ box.append(h('p',{class:'mt'},'Пока нет подключённых финансовых данных. Суммы не являются фактической выручкой.'),
+  h('section',{class:'card'},h('h3',{},'Рекламные баннеры'),
+   h('div',{class:'cards'},(r.banners||[]).map(item=>h('article',{class:'card st'},h('b',{},item.total),
+    h('span',{},item.title),h('p',{class:'mt'},`Оплачено: ${item.paid} · Доход сегодня: 0 ₽`))))),
+  h('div',{class:'cards'},[
+   ['Оборот по лотам',r.lot_turnover],
+   ['Чистая прибыль с лотов',r.lot_profit]
+  ].map(([title,value])=>h('article',{class:'card st'},h('b',{},value+' ₽'),h('span',{},title))),
+  API.me().role==='super'&&h('article',{class:'card st'},h('b',{},r.free_money+' ₽'),h('span',{},'Свободные деньги'))))}catch(e){fail(e)}}
+
+async function userDetail(row){
+ try{const result=await API.userDetail(row.id),user=result.user,activity=result.activity;
+  const d=dlg(h('h3',{},'Профиль пользователя · '+(user.nick||user.id)),
+   h('p',{class:'mt'},'Демонстрационные данные. Подробная карточка загружается по запросу.'),
+   h('div',{class:'cards'},Object.entries({Email:user.email||'—',ID:user.id,Статус:user.status||'—',
+    'Баланс':user.balance??'—','Лоты':activity.lots,'Магазины':activity.shops,
+    'Жалобы':activity.complaints,'Обращения':activity.support}).map(([label,value])=>
+      h('div',{class:'card st'},h('b',{},value),h('span',{},label)))),
+   h('div',{class:'row'},h('button',{class:'btn t',onclick:()=>d.close()},'Закрыть'),
+    h('button',{class:'btn',onclick:()=>{d.close();formDlg('Редактировать пользователя',SEC.users.e,SEC.users.c,user,async values=>{
+     try{await API.save('users',user.id,values);toast('Сохранено')}catch(e){fail(e);return false}
+    })}},'Редактировать')))
+ }catch(e){fail(e)}
+}
+
+function newsletter(k,box){
+ const form=h('form',{class:'card auth'},h('h3',{},'Рассылка подписчикам'),
+  h('label',{class:'f'},'Тема письма',h('input',{name:'subject',required:true,maxlength:200})),
+  h('label',{class:'f'},'Текст письма',h('textarea',{name:'body',rows:6,required:true})),
+  h('p',{class:'mt'},'Письмо отправляется только адресам с активной подпиской. Нужна настройка SMTP.'),
+  h('button',{class:'btn'},'Отправить подписчикам'));
+ form.onsubmit=async e=>{e.preventDefault();const fd=new FormData(form),subject=fd.get('subject'),body=fd.get('body');
+  if(!await ask('Отправить письмо всем активным подписчикам?'))return;
+  try{const result=await API.sendNewsletter(subject,body);toast('Отправлено: '+result.sent);form.reset()}
+  catch(error){fail(error)}
+ };
+ box.append(form)
+}
 
 async function bulk(k,box){try{const ops=await API.bulk();
  box.append(h('p',{class:'mt'},'Перед запуском показывается, сколько записей затронет операция. Выполняется пакетами по 10.'),
@@ -132,4 +244,17 @@ function assistant(k,box){
  draw();
 }
 
-stub();
+async function boot(){
+ try{
+  await API.init();
+  if(API.me()){
+   if(document.body.hasAttribute('data-admin-entry')&&!document.body.dataset.adminPage)menu();
+   else route();
+  }else if(document.body.hasAttribute('data-admin-entry')||document.body.dataset.adminPage)login();
+  else stub();
+ }catch(error){
+  if(document.body.hasAttribute('data-admin-entry')||document.body.dataset.adminPage)login('Не удалось подключиться к серверу: '+error.message);
+  else stub();
+ }
+}
+boot();

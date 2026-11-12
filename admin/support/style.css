@@ -1,0 +1,3 @@
+@import url("../css/style.css");
+
+body[data-admin-page="support"] .group-lead { max-width: 46rem; }
