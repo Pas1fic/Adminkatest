@@ -42,6 +42,7 @@ const API=(()=>{
    const params=new URLSearchParams();
    if(options.q)params.set('q',options.q);
    if(options.table)params.set('table',options.table);
+   if(options.category)params.set('category',options.category);
    if(options.field)params.set('field',options.field);
    params.set('page',String(options.page||1));
    for(const[key,value]of Object.entries(options.f||{}))if(value)params.set('f.'+key,value);
@@ -49,7 +50,7 @@ const API=(()=>{
    if(options.from&&options.dk){params.set('from',options.from);params.set('dk',options.dk)}
    const result=await request(`/api/${moduleName(module)}?${params}`);
    const rows=result.items||[];
-   return{rows,total:result.total??rows.length,pages:Math.max(1,Math.ceil((result.total??rows.length)/(result.limit||PAGE))),tables:result.tables||[],columns:result.columns||[],table:result.table||''};
+   return{rows,total:result.total??rows.length,pages:Math.max(1,Math.ceil((result.total??rows.length)/(result.limit||PAGE))),tables:result.tables||[],columns:result.columns||[],categories:result.categories||[],table:result.table||''};
   },
   async save(module,id,values){
    await request(`/api/${moduleName(module)}`,{method:'POST',body:{...values,id}});

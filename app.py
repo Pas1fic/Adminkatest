@@ -49,7 +49,7 @@ MODULES = {
     "currencies", "newsletter", "transactions", "promotion", "refunds",
     "profit", "stats", "audit", "admins", "scan", "bulk", "assistant", "project_data",
 }
-ADMIN_MODULES = {"users", "lots", "shops", "news", "support", "complaints"}
+ADMIN_MODULES = {"users", "lots", "shops", "news", "support", "complaints", "currencies", "newsletter"}
 SUPER_MODULES = MODULES - ADMIN_MODULES
 FIELDS = {
     "users": ["id", "nick", "email", "balance", "status", "fake", "last_login", "created_at"],
@@ -514,6 +514,9 @@ class Handler(BaseHTTPRequestHandler):
         if module not in MODULES:
             raise APIError(404, "not_found")
         require_module(auth, module)
+        if module in {"users", "lots", "shops", "currencies", "newsletter"}:
+            query = parse_qs(urlparse(self.path).query)
+            return self.send_json(200, self.project_module_get(module, query, auth["role"]))
         if module == "project_data":
             if auth["role"] != "super":
                 raise APIError(403, "forbidden", "Project Data is available to the owner account only.")
@@ -627,6 +630,76 @@ class Handler(BaseHTTPRequestHandler):
         db.close()
         return {"items": items, "page": page, "limit": limit, "total": total,
                 "pages": max(1, math.ceil(total / limit))}
+
+
+    def project_module_get(self, module: str, query: dict, role: str) -> dict:
+        db_path = (PRIMARY_DB_DIR / "project_data.db").resolve()
+        if PRIMARY_DB_DIR.resolve() not in db_path.parents or not db_path.is_file():
+            raise APIError(503, "project_data_missing", "Missing db/project_data.db.")
+        page = max(1, min(100000, int((query.get("page") or ["1"])[0])))
+        search = (query.get("q") or [""])[0].strip().casefold()
+        limit = 1000 if (query.get("all") or [""])[0] == "1" else PAGE_SIZE
+        offset = 0 if limit == 1000 else (page - 1) * PAGE_SIZE
+        with closing(sqlite3.connect(f"file:{db_path.as_posix()}?mode=ro", uri=True, timeout=15)) as db:
+            db.row_factory = sqlite3.Row
+            if module == "users":
+                cols = [r[1] for r in db.execute('PRAGMA table_info("users")')]
+                hidden = {"password", "login_token", "registration_token", "last_ip", "last_ip_date", "user_device_data", "email", "mobile", "adress", "post_index", "birthday", "patronymic"}
+                visible = [c for c in cols if role == "super" or c not in hidden]
+                where, params = "", []
+                if search:
+                    terms = [c for c in ("id", "name", "surname", "email", "mobile", "user_shop_name") if c in visible]
+                    where = " WHERE " + " OR ".join(f'CAST("{c}" AS TEXT) LIKE ?' for c in terms)
+                    params = [f"%{search}%"] * len(terms)
+                total = db.execute(f"SELECT COUNT(*) FROM users{where}", params).fetchone()[0]
+                rows = db.execute(f'SELECT {",".join(chr(34)+c+chr(34) for c in visible)} FROM users{where} ORDER BY id DESC LIMIT ? OFFSET ?', (*params, limit, offset)).fetchall()
+                return {"items": [dict(r) for r in rows], "columns": visible, "page": page, "limit": limit, "total": total, "pages": max(1, math.ceil(total/limit))}
+            if module == "shops":
+                cols = ["id", "name", "surname", "user_shop_name", "shop_description", "shop_avatar", "shop_banner", "shop_verification", "shop_podcategory"]
+                if role == "super": cols += ["email", "last_payment_for_shop"]
+                where, params = ' WHERE lower(trim(COALESCE(user_shop_name, ""))) NOT IN ("", "none", "null")', []
+                if search:
+                    where += " AND (lower(user_shop_name) LIKE ? OR lower(name) LIKE ? OR CAST(id AS TEXT) LIKE ?)"
+                    params = [f"%{search}%"] * 3
+                total = db.execute(f"SELECT COUNT(*) FROM users{where}", params).fetchone()[0]
+                rows = db.execute(f'SELECT {",".join(chr(34)+c+chr(34) for c in cols)} FROM users{where} ORDER BY id DESC LIMIT ? OFFSET ?', (*params, limit, offset)).fetchall()
+                return {"items": [dict(r) for r in rows], "columns": cols, "page": page, "limit": limit, "total": total, "pages": max(1, math.ceil(total/limit))}
+            if module == "lots":
+                names = [r[0] for r in db.execute("SELECT name FROM sqlite_master WHERE type='table' AND name LIKE '%_category' ORDER BY name")]
+                chosen = (query.get("category") or [""])[0]
+                if chosen and chosen not in names: raise APIError(400, "invalid_category")
+                selected = [chosen] if chosen else names
+                parts, params = [], []
+                for name in selected:
+                    parts.append('SELECT *, ? AS source_category FROM "' + name.replace('"','""') + '"')
+                    params.append(name)
+                union = " UNION ALL ".join(parts)
+                searchable = ["lot_name", "seller_id\t", "lot_category", "lot_podcategory", "lot_description", "current_lot_status"]
+                where, search_params = "", []
+                if search:
+                    where = " WHERE " + " OR ".join(f'lower(CAST("{c}" AS TEXT)) LIKE ?' for c in searchable)
+                    search_params = [f"%{search}%"] * len(searchable)
+                total = db.execute(f"SELECT COUNT(*) FROM ({union}){where}", (*params, *search_params)).fetchone()[0]
+                rows = db.execute(f"SELECT * FROM ({union}){where} ORDER BY id DESC LIMIT ? OFFSET ?", (*params, *search_params, limit, offset)).fetchall()
+                cols = ["id", "lot_name", "seller_id", "lot_category", "lot_podcategory", "lot_start_price", "current_price", "current_lot_status", "category_table"]
+                if role == "super": cols += ["lot_delivery_track_number", "user_seller_chat_token", "dispute_user_description", "dispute_seller_description"]
+                items = []
+                for row in rows:
+                    d = dict(row); d["category_table"] = d.pop("source_category", ""); d["seller_id"] = d.pop("seller_id\t", d.get("seller_id"))
+                    items.append({k:v for k,v in d.items() if k in cols})
+                return {"items": items, "columns": cols, "categories": [{"name": n, "count": db.execute('SELECT COUNT(*) FROM "'+n+'"').fetchone()[0]} for n in names], "page": page, "limit": limit, "total": total, "pages": max(1, math.ceil(total/limit))}
+            if module == "currencies":
+                row = db.execute('SELECT * FROM currency_converter LIMIT 1').fetchone()
+                names = [c[1] for c in db.execute('PRAGMA table_info("currency_converter")')]
+                items = [{"code": n.upper(), "rate": row[n], "updated": "project_data.db"} for n in names] if row else []
+                if search: items = [x for x in items if search in x["code"].lower()]
+                return {"items": items, "columns": ["code", "rate", "updated"], "page": 1, "limit": limit, "total": len(items), "pages": 1}
+            if module == "newsletter":
+                where, params = (" WHERE lower(mail) LIKE ?", [f"%{search}%"]) if search else ("", [])
+                total = db.execute(f"SELECT COUNT(*) FROM spam_emails{where}", params).fetchone()[0]
+                rows = db.execute(f'SELECT id, mail AS email, date AS joined, "spam" AS status FROM spam_emails{where} ORDER BY id DESC LIMIT ? OFFSET ?', (*params, limit, offset)).fetchall()
+                return {"items": [dict(r) for r in rows], "columns": ["id", "email", "status", "joined"], "page": page, "limit": limit, "total": total, "pages": max(1, math.ceil(total/limit))}
+        raise APIError(404, "not_found")
 
     def project_data_get(self, query: dict) -> dict:
         db_path = (PRIMARY_DB_DIR / "project_data.db").resolve()

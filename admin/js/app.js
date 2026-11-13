@@ -92,7 +92,7 @@ const GROUPS=[
  {t:'Информация обо всём',i:'🧭',d:'Пользователи, лоты и магазины',page:'info',items:['users','lots','shops']},
  {t:'Добавление контента',i:'✨',d:'Баннеры, новости и курсы валют',page:'content',items:['banners','news','currencies']}
 ];
-const ADMIN_HOME=['users','lots','news','complaints','support','shops'];
+const ADMIN_HOME=['users','lots','news','complaints','support','shops','currencies','newsletter'];
 const MODULE_PAGES={promotion:'finance',profit:'finance',refunds:'finance',stats:'analytics',transactions:'analytics',
  newsletter:'system',journal:'system',admins:'system',scan:'system',bulk:'system',assistant:'system',project_data:'system'};
 function moduleTiles(keys){return h('div',{class:'tiles'},keys.filter(k=>API.can(k)).map(k=>{
@@ -131,8 +131,8 @@ function route(){
 }
 function open(k){
  if(k==='profit')return unlockProfit();
- if(k==='project_data'){const box=h('div');shell(SEC[k].t,box);return projectDataView(box)}
- const box=h('div');shell(SEC[k].t,box);({bulk,assistant,profit,stats,scan,newsletter}[k]||listView)(k,box)
+
+ const box=h('div');shell(SEC[k].t,box);({bulk,assistant,profit,stats,scan}[k]||listView)(k,box)
 }
 async function unlockProfit(){
  formDlg('Подтвердите пароль',{password:'password'},{password:'Пароль'}, {},async data=>{
@@ -146,13 +146,13 @@ const cell=v=>typeof v=='boolean'?(v?'✓':'—'):typeof v=='string'&&(GOOD.test
 
 function listView(k,box){
  const s=SEC[k],co=s.co||k,d=st.d[k]??={q:'',page:1,f:{},from:''};
- const tw=h('div',{class:'tw'}),pg=h('div',{class:'pg'}),bar=h('div',{class:'bar'});
- const load=async()=>{try{draw(await API.list(co,{...d,dk:s.dk}))}catch(e){fail(e)}};
+ const tw=h('div',{class:'tw'}),pg=h('div',{class:'pg'}),bar=h('div',{class:'bar'});let categoryFilter=null;
+ const load=async()=>{try{const r=await API.list(co,{...d,dk:s.dk});if(k==='lots'){d.categories=r.categories||d.categories||[];if(categoryFilter){const current=d.category||'';categoryFilter.replaceChildren(h('option',{value:''},'\u0412\u0441\u0435 \u043a\u0430\u0442\u0435\u0433\u043e\u0440\u0438\u0438'),...(d.categories||[]).map(v=>h('option',{value:v.name},v.name+' ('+v.count+')')));categoryFilter.value=current}}draw(r)}catch(e){fail(e)}};
  const btn=(t,on,fn)=>h('button',{class:'btn t',disabled:!on,onclick:fn},t);
  const edit=r=>formDlg('Запись #'+r.id,s.e,s.c,r,async p=>{try{await API.save(co,r.id,p);toast('Сохранено');load()}catch(e){fail(e);return false}});
- const detail=r=>{if(k==='users')userDetail(r);else edit(r)};
+ const detail=r=>{if(k==='users'){const d=dlg(h('h3',{},'\u041f\u043e\u043b\u044c\u0437\u043e\u0432\u0430\u0442\u0435\u043b\u044c \u00b7 #'+r.id),h('div',{class:'pd-detail'},Object.entries(r).map(([key,value])=>h('div',{class:'pd-field'},h('b',{},key),h('span',{},value==null?'NULL':String(value))))),h('div',{class:'row'},h('button',{class:'btn t',onclick:()=>d.close()},'\u0417\u0430\u043a\u0440\u044b\u0442\u044c')))}else if(s.e)edit(r)};
  const run=(label,r,fn)=>async()=>{if(await ask(label+' · запись #'+r.id+'?'))try{await fn();toast('Готово');load()}catch(e){fail(e)}};
- const draw=r=>{const cols=Object.keys(s.c),has=s.act||s.del||s.logs;d.page=Math.min(d.page,r.pages);
+ const draw=r=>{const cols=Object.keys(s.c).filter(c=>!r.columns||r.columns.includes(c)),has=s.act||s.del||s.logs;d.page=Math.min(d.page,r.pages);
   tw.replaceChildren(h('table',{},h('thead',{},h('tr',{},cols.map(c=>h('th',{},s.c[c])),has&&h('th',{},''))),
    h('tbody',{},r.rows.length?r.rows.map(r=>h('tr',{class:s.e||k=='users'?'cl':'',onclick:(s.e||k=='users')&&(()=>detail(r))},cols.map(c=>h('td',{},cell(r[c]))),
     has&&h('td',{onclick:e=>e.stopPropagation()},(s.act||[]).map(([a,l])=>h('button',{class:'btn t sm',onclick:run(l,r,()=>API.act(co,r.id,a))},l)),
@@ -160,14 +160,9 @@ function listView(k,box){
      s.logs&&h('button',{class:'btn t sm',onclick:()=>API.downloadAdminLog(r.id).catch(fail)},'TXT')))):
     h('tr',{},h('td',{colspan:cols.length+1},'Ничего не найдено. Измените поиск или фильтры.')))));
   pg.replaceChildren(btn('←',d.page>1,()=>{d.page--;load()}),h('span',{},`стр. ${d.page} из ${r.pages} · всего ${r.total}`),btn('→',d.page<r.pages,()=>{d.page++;load()}))};
- if(k==='users'){
-  d.field=d.field||'nick';
-  const field=h('select',{'aria-label':'Искать по'},[['nick','Никнейму'],['email','Почте'],['id','ID пользователя'],['shop','Магазину']].map(([v,l])=>h('option',{value:v},l)));
-  field.value=d.field;field.onchange=()=>{d.field=field.value;d.page=1;load()};bar.append(field)
- }
  if(s.q){const q=h('input',{type:'search',placeholder:'Поиск: '+s.q,'aria-label':'Поиск'});q.value=d.q;let t;
   q.oninput=()=>{clearTimeout(t);t=setTimeout(()=>{d.q=q.value;d.page=1;load()},250)};bar.append(q)}
- for(const[fk,o]of Object.entries(s.f||{})){const f=h('select',{'aria-label':s.c[fk]},h('option',{value:''},s.c[fk]+': все'),o.map(v=>h('option',{},v)));
+ if(k==='lots'){categoryFilter=h('select',{'aria-label':'\u041a\u0430\u0442\u0435\u0433\u043e\u0440\u0438\u044f \u043b\u043e\u0442\u043e\u0432'},h('option',{value:''},'\u0412\u0441\u0435 \u043a\u0430\u0442\u0435\u0433\u043e\u0440\u0438\u0438'));categoryFilter.value=d.category||'';categoryFilter.onchange=()=>{d.category=categoryFilter.value;d.page=1;load()};bar.append(categoryFilter)} for(const[fk,o]of Object.entries(s.f||{})){const f=h('select',{'aria-label':s.c[fk]},h('option',{value:''},s.c[fk]+': все'),o.map(v=>h('option',{},v)));
   f.value=d.f[fk]||'';f.onchange=()=>{d.f[fk]=f.value;d.page=1;load()};bar.append(f)}
  if(s.dk){const f=h('input',{type:'date','aria-label':'С даты',title:'С даты'});f.value=d.from;f.onchange=()=>{d.from=f.value;d.page=1;load()};bar.append(f)}
  if(s.a)bar.append(h('button',{class:'btn',onclick:()=>formDlg('Добавить',s.a,s.c,k==='admins'?{sections:ADMIN_HOME.join(',')}:(s.defaults||{}),async p=>{try{await API.add(co,p);toast('Добавлено');load()}catch(e){fail(e);return false}})},'+ Добавить'));
