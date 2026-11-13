@@ -141,8 +141,15 @@ async function unlockProfit(){
  })
 }
 
-const GOOD=/^(active|done|accepted)$/,BAD=/^(blocked|rejected|new|pending)$/;
-const cell=v=>typeof v=='boolean'?(v?'✓':'—'):typeof v=='string'&&(GOOD.test(v)||BAD.test(v))?h('span',{class:'bd '+(GOOD.test(v)?'ok':'bad')},v):v;
+const GOOD=/^(active|done|accepted)$/i,BAD=/^(blocked|rejected|new|pending)$/i;
+const cell=v=>{
+ if(typeof v==='boolean')return v?'\u2713':'\u2014';
+ if(typeof v==='string'&&['none','null','undefined'].includes(v.trim().toLowerCase()))return '\u2014';
+ if(typeof v==='string'&&v.startsWith('data:image/'))return h('img',{class:'table-thumb',src:v,alt:'\u0418\u0437\u043e\u0431\u0440\u0430\u0436\u0435\u043d\u0438\u0435',loading:'lazy'});
+ if(typeof v==='string'&&(GOOD.test(v)||BAD.test(v)))return h('span',{class:'bd '+(GOOD.test(v)?'ok':'bad')},v);
+ if(typeof v==='string'&&v.length>90)return h('span',{title:v},v.slice(0,87)+'\u2026');
+ return v==null||v===''?'\u2014':v;
+};
 
 function listView(k,box){
  const s=SEC[k],co=s.co||k,d=st.d[k]??={q:'',page:1,f:{},from:''};
@@ -150,11 +157,26 @@ function listView(k,box){
  const load=async()=>{try{const r=await API.list(co,{...d,dk:s.dk});if(k==='lots'){d.categories=r.categories||d.categories||[];if(categoryFilter){const current=d.category||'';categoryFilter.replaceChildren(h('option',{value:''},'\u0412\u0441\u0435 \u043a\u0430\u0442\u0435\u0433\u043e\u0440\u0438\u0438'),...(d.categories||[]).map(v=>h('option',{value:v.name},v.name+' ('+v.count+')')));categoryFilter.value=current}}draw(r)}catch(e){fail(e)}};
  const btn=(t,on,fn)=>h('button',{class:'btn t',disabled:!on,onclick:fn},t);
  const edit=r=>formDlg('Запись #'+r.id,s.e,s.c,r,async p=>{try{await API.save(co,r.id,p);toast('Сохранено');load()}catch(e){fail(e);return false}});
- const detail=r=>{if(k==='users'){const d=dlg(h('h3',{},'\u041f\u043e\u043b\u044c\u0437\u043e\u0432\u0430\u0442\u0435\u043b\u044c \u00b7 #'+r.id),h('div',{class:'pd-detail'},Object.entries(r).map(([key,value])=>h('div',{class:'pd-field'},h('b',{},key),h('span',{},value==null?'NULL':String(value))))),h('div',{class:'row'},h('button',{class:'btn t',onclick:()=>d.close()},'\u0417\u0430\u043a\u0440\u044b\u0442\u044c')))}else if(s.e)edit(r)};
+ const detail=r=>{
+  if(['users','shops','lots'].includes(k)){
+   const title=k==='users'?'\u041f\u043e\u043b\u044c\u0437\u043e\u0432\u0430\u0442\u0435\u043b\u044c':k==='shops'?'\u041c\u0430\u0433\u0430\u0437\u0438\u043d':'\u041b\u043e\u0442';
+   const fields=Object.entries(r).filter(([key,value])=>value!=null&&value!==''&&String(value).toLowerCase()!=='none'&&!['null','undefined'].includes(String(value).toLowerCase())).map(([key,value])=>{
+    const label=s.c[key]||key;
+    if(typeof value==='string'&&value.startsWith('data:image/'))return h('div',{class:'record-media'},h('b',{},label),h('img',{class:'record-image',src:value,alt:label,loading:'lazy'}));
+    let shown=value;
+    if(typeof value==='string'&&/^[\[{]/.test(value)){try{shown=JSON.stringify(JSON.parse(value),null,2)}catch{}}
+    return h('div',{class:'pd-field'},h('b',{},label),h('span',{},String(shown)));
+   });
+   const d=dlg(h('div',{class:'record-head'},h('h3',{},title+' \u00b7 #'+r.id),h('span',{class:'mt'},k==='shops'?(r.name||'')+' '+(r.surname||'')+' \u00b7 \u0432\u043b\u0430\u0434\u0435\u043b\u0435\u0446':'\u041f\u043e\u0434\u0440\u043e\u0431\u043d\u0430\u044f \u0438\u043d\u0444\u043e\u0440\u043c\u0430\u0446\u0438\u044f')),
+    h('div',{class:'pd-detail'},fields.length?fields:h('p',{class:'mt'},'\u041d\u0435\u0442 \u0437\u0430\u043f\u043e\u043b\u043d\u0435\u043d\u043d\u044b\u0445 \u0434\u043e\u043f\u043e\u043b\u043d\u0438\u0442\u0435\u043b\u044c\u043d\u044b\u0445 \u043f\u043e\u043b\u0435\u0439.')),
+    h('div',{class:'row'},h('button',{class:'btn t',onclick:()=>d.close()},'\u0417\u0430\u043a\u0440\u044b\u0442\u044c')));
+   d.classList.add('record-dialog');
+  }else if(s.e)edit(r)
+ };
  const run=(label,r,fn)=>async()=>{if(await ask(label+' · запись #'+r.id+'?'))try{await fn();toast('Готово');load()}catch(e){fail(e)}};
- const draw=r=>{const cols=Object.keys(s.c).filter(c=>!r.columns||r.columns.includes(c)),has=s.act||s.del||s.logs;d.page=Math.min(d.page,r.pages);
+ const draw=r=>{const cols=Object.keys(s.c).filter(c=>(!r.columns||r.columns.includes(c))&&!(s.hide||[]).includes(c)),has=s.act||s.del||s.logs;d.page=Math.min(d.page,r.pages);
   tw.replaceChildren(h('table',{},h('thead',{},h('tr',{},cols.map(c=>h('th',{},s.c[c])),has&&h('th',{},''))),
-   h('tbody',{},r.rows.length?r.rows.map(r=>h('tr',{class:s.e||k=='users'?'cl':'',onclick:(s.e||k=='users')&&(()=>detail(r))},cols.map(c=>h('td',{},cell(r[c]))),
+   h('tbody',{},r.rows.length?r.rows.map(r=>h('tr',{class:s.e||['users','shops','lots'].includes(k)?'cl':'',onclick:(s.e||['users','shops','lots'].includes(k))&&(()=>detail(r))},cols.map(c=>h('td',{},cell(r[c]))),
     has&&h('td',{onclick:e=>e.stopPropagation()},(s.act||[]).map(([a,l])=>h('button',{class:'btn t sm',onclick:run(l,r,()=>API.act(co,r.id,a))},l)),
      s.del&&h('button',{class:'btn t sm',onclick:run('Удалить',r,()=>API.del(co,r.id))},'Удалить'),
      s.logs&&h('button',{class:'btn t sm',onclick:()=>API.downloadAdminLog(r.id).catch(fail)},'TXT')))):

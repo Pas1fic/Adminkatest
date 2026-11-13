@@ -261,13 +261,26 @@ input[type=checkbox] { width: 22px; min-height: 22px; accent-color: var(--pr); }
 table { width: 100%; border-collapse: collapse; }
 th, td {
   max-width: 280px;
-  padding: 14px 16px;
-  overflow: hidden;
+  padding: 12px 14px;
   border-bottom: 1px solid var(--ln);
   text-align: left;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  vertical-align: top;
+  white-space: normal;
+  overflow-wrap: anywhere;
 }
+th { white-space: nowrap; }
+.tw table { min-width: 760px; }
+.table-thumb { display: block; width: 54px; height: 42px; object-fit: cover; border-radius: 8px; border: 1px solid var(--ln); }
+.record-dialog { width: min(940px, calc(100vw - 28px)); max-height: min(88vh, 900px); overflow: auto; }
+.record-head { display: flex; align-items: baseline; justify-content: space-between; flex-wrap: wrap; gap: 8px 18px; margin-bottom: 18px; }
+.record-head h3 { margin: 0; }
+.pd-detail { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; max-height: 65vh; overflow: auto; padding: 2px; margin-bottom: 18px; }
+.pd-field, .record-media { min-width: 0; padding: 12px 14px; border: 1px solid var(--ln); border-radius: 12px; background: color-mix(in srgb, var(--bg) 45%, var(--sf)); }
+.pd-field b, .record-media b { display: block; margin-bottom: 6px; color: var(--mt); font-size: 11px; text-transform: uppercase; letter-spacing: .035em; }
+.pd-field span { display: block; overflow-wrap: anywhere; white-space: pre-wrap; }
+.record-media { grid-column: span 1; }
+.record-image { display: block; max-width: 100%; max-height: 220px; object-fit: contain; border-radius: 8px; background: var(--bg); }
+@media (max-width: 620px) { .pd-detail { grid-template-columns: 1fr; } .record-dialog { padding: 18px; } }
 
 th {
   background: color-mix(in srgb, var(--bg) 55%, var(--sf));

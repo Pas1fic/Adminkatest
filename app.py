@@ -643,9 +643,15 @@ class Handler(BaseHTTPRequestHandler):
         with closing(sqlite3.connect(f"file:{db_path.as_posix()}?mode=ro", uri=True, timeout=15)) as db:
             db.row_factory = sqlite3.Row
             if module == "users":
-                cols = [r[1] for r in db.execute('PRAGMA table_info("users")')]
-                hidden = {"password", "login_token", "registration_token", "last_ip", "last_ip_date", "user_device_data", "email", "mobile", "adress", "post_index", "birthday", "patronymic"}
-                visible = [c for c in cols if role == "super" or c not in hidden]
+                # Explicit allowlists: never return credentials, tokens, IPs or device fingerprints.
+                admin_cols = ["id", "name", "surname", "country", "city", "accaunt_type",
+                              "registration_data", "last_visit", "user_rate", "lot_count",
+                              "language", "currency", "user_shop_name"]
+                super_cols = admin_cols + ["patronymic", "email", "mobile", "birthday",
+                                           "adress", "post_index", "last_pay", "last_payment_for_shop",
+                                           "shop_verification", "shop_podcategory"]
+                available = {r[1] for r in db.execute('PRAGMA table_info("users")')}
+                visible = [c for c in (super_cols if role == "super" else admin_cols) if c in available]
                 where, params = "", []
                 if search:
                     terms = [c for c in ("id", "name", "surname", "email", "mobile", "user_shop_name") if c in visible]
@@ -655,8 +661,12 @@ class Handler(BaseHTTPRequestHandler):
                 rows = db.execute(f'SELECT {",".join(chr(34)+c+chr(34) for c in visible)} FROM users{where} ORDER BY id DESC LIMIT ? OFFSET ?', (*params, limit, offset)).fetchall()
                 return {"items": [dict(r) for r in rows], "columns": visible, "page": page, "limit": limit, "total": total, "pages": max(1, math.ceil(total/limit))}
             if module == "shops":
-                cols = ["id", "name", "surname", "user_shop_name", "shop_description", "shop_avatar", "shop_banner", "shop_verification", "shop_podcategory"]
+                cols = ["id", "name", "surname", "user_shop_name", "shop_description",
+                        "shop_avatar", "shop_banner", "shop_verification", "shop_podcategory",
+                        "country", "city"]
                 if role == "super": cols += ["email", "last_payment_for_shop"]
+                available = {r[1] for r in db.execute('PRAGMA table_info("users")')}
+                cols = [c for c in cols if c in available]
                 where, params = ' WHERE lower(trim(COALESCE(user_shop_name, ""))) NOT IN ("", "none", "null")', []
                 if search:
                     where += " AND (lower(user_shop_name) LIKE ? OR lower(name) LIKE ? OR CAST(id AS TEXT) LIKE ?)"
@@ -681,8 +691,16 @@ class Handler(BaseHTTPRequestHandler):
                     search_params = [f"%{search}%"] * len(searchable)
                 total = db.execute(f"SELECT COUNT(*) FROM ({union}){where}", (*params, *search_params)).fetchone()[0]
                 rows = db.execute(f"SELECT * FROM ({union}){where} ORDER BY id DESC LIMIT ? OFFSET ?", (*params, *search_params, limit, offset)).fetchall()
-                cols = ["id", "lot_name", "seller_id", "lot_category", "lot_podcategory", "lot_start_price", "current_price", "current_lot_status", "category_table"]
-                if role == "super": cols += ["lot_delivery_track_number", "user_seller_chat_token", "dispute_user_description", "dispute_seller_description"]
+                cols = ["id", "lot_name", "seller_id", "lot_category", "lot_podcategory",
+                        "lot_year", "lot_condition", "auction_type", "lot_start_price",
+                        "lot_step", "lot_buy_now", "lot_minimum_bid", "current_price",
+                        "current_lot_status", "lot_description", "lot_country", "lot_city",
+                        "realtime_date", "lot_bids_counter", "lot_view_counter",
+                        "pic1", "pic2", "pic3", "pic4", "pic5", "category_table"]
+                if role == "super":
+                    cols += ["lot_delivery_track_number", "dispute_user_description",
+                             "dispute_seller_description", "seller_lot_confirmation",
+                             "payment_confirmation", "lot_where_is_sold", "lot_give_money"]
                 items = []
                 for row in rows:
                     d = dict(row); d["category_table"] = d.pop("source_category", ""); d["seller_id"] = d.pop("seller_id\t", d.get("seller_id"))
@@ -719,6 +737,16 @@ class Handler(BaseHTTPRequestHandler):
                 raise APIError(404, "project_data_table_not_found")
             quoted = '"' + selected.replace('"', '""') + '"'
             columns = [dict(row) for row in db.execute(f"PRAGMA table_info({quoted})")]
+            # Even the owner-only raw table browser must never expose authentication
+            # secrets or device/network identifiers.
+            sensitive_columns = {
+                "password", "password_hash", "login_token", "registration_token",
+                "user_seller_chat_token", "reset_token", "access_token", "refresh_token",
+                "secret", "api_key", "last_ip", "last_ip_date", "user_device_data",
+                "device_id", "session_token",
+            }
+            columns = [column for column in columns
+                       if column["name"].casefold() not in sensitive_columns]
             try:
                 page = max(1, min(100000, int((query.get("page") or ["1"])[0])))
             except ValueError as exc:
