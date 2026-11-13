@@ -34,18 +34,19 @@ COOKIE_SECURE = os.environ.get("COOKIE_SECURE") == "1"
 MAX_BODY = 2_500_000
 PAGE_SIZE = 10
 
-# Fixed allowlist: browser input can never choose an arbitrary database path.
-TEST_DATABASES = {
-    "news": {"title": "Новости", "file": "news.db", "tables": ["news"]},
-    "support": {"title": "Поддержка", "file": "profile_support.db", "tables": ["support_messages"]},
-    "yammer": {"title": "Жалобы", "file": "profile_yammer.db", "tables": ["yammer_messages"]},
+# These are the application's primary content databases. They are separate from
+# admin.sqlite3, which stores admin accounts, sessions, permissions and audit.
+PRIMARY_DATABASES = {
+    "news": {"file": "news.db", "table": "news"},
+    "support": {"file": "profile_support.db", "table": "support_messages"},
+    "complaints": {"file": "profile_yammer.db", "table": "yammer_messages"},
 }
-TEST_DB_DIR = Path(os.environ.get("ADMIN_TEST_DB_DIR", ROOT / "test_databases")).resolve()
+PRIMARY_DB_DIR = Path(os.environ.get("ADMIN_PRIMARY_DB_DIR", ROOT / "db")).resolve()
 
 MODULES = {
     "users", "lots", "shops", "news", "support", "complaints", "banners",
     "currencies", "newsletter", "transactions", "promotion", "refunds",
-    "profit", "stats", "audit", "admins", "scan", "bulk", "assistant", "testdb",
+    "profit", "stats", "audit", "admins", "scan", "bulk", "assistant",
 }
 ADMIN_MODULES = {"users", "lots", "shops", "news", "support", "complaints"}
 SUPER_MODULES = MODULES - ADMIN_MODULES
@@ -53,9 +54,9 @@ FIELDS = {
     "users": ["id", "nick", "email", "balance", "status", "fake", "last_login", "created_at"],
     "lots": ["id", "title", "seller", "price", "status", "fake", "category", "subcategory", "auction_date"],
     "shops": ["id", "name", "owner", "status", "promoted"],
-    "news": ["id", "title", "text", "image_data", "date", "status"],
-    "support": ["id", "from", "date", "status", "text"],
-    "complaints": ["id", "type", "target", "status", "text"],
+    "news": ["id", "cat", "badge", "title", "desc", "body", "img", "read_time", "published", "created_at"],
+    "support": ["id", "date_message", "header_message", "message", "priority", "proof", "user_id", "user_name", "user_mail"],
+    "complaints": ["id", "date_message", "reason", "message", "proof", "link_proof", "email_user", "user_id", "user_name"],
     "banners": ["id", "place", "title", "from", "to", "active", "paid", "amount"],
     "currencies": ["id", "code", "rate", "updated"],
     "newsletter": ["id", "email", "status", "joined"],
@@ -506,18 +507,15 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.write(body)
             return
 
-        if path == "/api/test-databases" or path.startswith("/api/test-databases/"):
-            auth = self.require_auth()
-            if auth["role"] != "super":
-                raise APIError(403, "forbidden")
-            return self.test_database_get(path)
-
         auth = self.require_auth()
         parts = path.removeprefix("/api/").split("/")
         module = parts[0]
         if module not in MODULES:
             raise APIError(404, "not_found")
         require_module(auth, module)
+        if module in PRIMARY_DATABASES:
+            query = parse_qs(urlparse(self.path).query)
+            return self.send_json(200, self.primary_database_get(module, query))
         if module == "profit":
             return self.send_json(200, self.profit_summary())
         if module == "stats":
@@ -554,104 +552,114 @@ class Handler(BaseHTTPRequestHandler):
         return self.send_json(200, self.list_records(module, query))
 
     @staticmethod
-    def _test_db_spec(db_key: str, table: str | None = None) -> tuple[Path, str | None]:
-        spec = TEST_DATABASES.get(db_key)
-        if not spec or (table is not None and table not in spec["tables"]):
-            raise APIError(404, "test_database_not_found")
-        path = (TEST_DB_DIR / spec["file"]).resolve()
-        if TEST_DB_DIR.resolve() not in path.parents or not path.is_file():
-            raise APIError(404, "test_database_file_missing")
-        return path, table
+    def _primary_db_spec(module: str) -> tuple[Path, str]:
+        spec = PRIMARY_DATABASES.get(module)
+        if not spec:
+            raise APIError(404, "database_module_not_found")
+        base = PRIMARY_DB_DIR.resolve()
+        path = (base / spec["file"]).resolve()
+        if base not in path.parents or not path.is_file():
+            raise APIError(503, "primary_database_missing",
+                           f"Не найдена основная база {spec['file']} в каталоге {base}.")
+        return path, spec["table"]
 
     @staticmethod
-    def _test_db_schema(db: sqlite3.Connection, table: str) -> tuple[list[dict], str]:
-        # table is validated against TEST_DATABASES before reaching this method.
+    def _primary_db_schema(db: sqlite3.Connection, table: str) -> tuple[list[dict], str]:
         quoted = '"' + table.replace('"', '""') + '"'
         columns = [dict(row) for row in db.execute(f"PRAGMA table_info({quoted})")]
         if not columns:
-            raise APIError(404, "test_database_table_missing")
+            raise APIError(404, "primary_database_table_missing")
         primary = next((col["name"] for col in columns if col["pk"]), "")
         if not primary:
-            raise APIError(400, "test_database_primary_key_required")
+            raise APIError(400, "primary_database_primary_key_required")
         return columns, primary
 
-    def test_database_get(self, path: str) -> None:
-        parts = path.removeprefix("/api/test-databases").strip("/").split("/")
-        if not parts or parts == [""]:
-            return self.send_json(200, {"databases": [
-                {"id": key, "title": spec["title"], "file": spec["file"],
-                 "tables": spec["tables"]}
-                for key, spec in TEST_DATABASES.items()
-            ]})
-        db_key = parts[0]
-        if len(parts) == 1:
-            self._test_db_spec(db_key)
-            spec = TEST_DATABASES[db_key]
-            return self.send_json(200, {"id": db_key, "title": spec["title"],
-                                        "file": spec["file"], "tables": spec["tables"]})
-        if len(parts) != 2:
-            raise APIError(404, "not_found")
-        db_path, table = self._test_db_spec(db_key, parts[1])
-        query = parse_qs(urlparse(self.path).query)
+    @staticmethod
+    def _primary_db_value(column: dict, value: object) -> object:
+        # Proofs are stored as BLOBs (some legacy rows contain text data URIs).
+        if column["name"] == "proof":
+            if value in (None, "", b"", "none"):
+                return "[Вложение отсутствует]"
+            size = len(value) if isinstance(value, (bytes, bytearray)) else len(str(value))
+            return f"[Вложение · {size} байт]"
+        if isinstance(value, bytes):
+            return f"[BLOB · {len(value)} байт]"
+        return value
+
+    def primary_database_get(self, module: str, query: dict) -> dict:
+        db_path, table = self._primary_db_spec(module)
         try:
             page = max(1, min(100000, int((query.get("page") or ["1"])[0])))
         except ValueError as exc:
             raise APIError(400, "invalid_pagination") from exc
         search = (query.get("q") or [""])[0].strip().casefold()
+        all_rows = (query.get("all") or [""])[0] == "1"
+        limit = 1000 if all_rows else PAGE_SIZE
+        offset = 0 if all_rows else (page - 1) * PAGE_SIZE
         quoted = '"' + table.replace('"', '""') + '"'
-        with sqlite3.connect(db_path) as db:
+        with sqlite3.connect(db_path, timeout=15) as db:
             db.row_factory = sqlite3.Row
-            columns, primary = self._test_db_schema(db, table)
-            searchable = [c["name"] for c in columns if "BLOB" not in str(c["type"]).upper()]
+            columns, primary = self._primary_db_schema(db, table)
+            searchable = [c["name"] for c in columns
+                          if "BLOB" not in str(c["type"]).upper() and c["name"] != "proof"]
             where, params = "", []
             if search and searchable:
                 where = " WHERE " + " OR ".join(
-                    f"lower(CAST({chr(34)+name.replace(chr(34), chr(34)*2)+chr(34)} AS TEXT)) LIKE ?"
+                    f'lower(CAST("{name.replace(chr(34), chr(34)*2)}" AS TEXT)) LIKE ?'
                     for name in searchable
                 )
                 params = [f"%{search}%"] * len(searchable)
             total = db.execute(f"SELECT COUNT(*) FROM {quoted}{where}", params).fetchone()[0]
             rows = db.execute(
-                f"SELECT * FROM {quoted}{where} ORDER BY {chr(34)+primary+chr(34)} DESC LIMIT ? OFFSET ?",
-                (*params, PAGE_SIZE, (page - 1) * PAGE_SIZE),
+                f'SELECT * FROM {quoted}{where} ORDER BY "{primary}" DESC LIMIT ? OFFSET ?',
+                (*params, limit, offset),
             ).fetchall()
-            items = []
-            for row in rows:
-                item = {}
-                for col in columns:
-                    value = row[col["name"]]
-                    if isinstance(value, bytes):
-                        value = f"[BLOB · {len(value)} байт]" if value else "[BLOB · пусто]"
-                    item[col["name"]] = value
-                items.append(item)
+            items = [
+                {col["name"]: self._primary_db_value(col, row[col["name"]]) for col in columns}
+                for row in rows
+            ]
         db.close()
-        visible = [{"name": c["name"], "type": c["type"], "notnull": bool(c["notnull"]),
-                    "default": c["dflt_value"], "pk": bool(c["pk"]),
-                    "editable": not bool(c["pk"]),
-                    "input_type": "blob" if "BLOB" in str(c["type"]).upper() else "area"}
-                   for c in columns]
-        return self.send_json(200, {"items": items, "columns": visible, "primary_key": primary,
-                                    "page": page, "limit": PAGE_SIZE, "total": total,
-                                    "pages": max(1, math.ceil(total / PAGE_SIZE))})
+        return {"items": items, "page": page, "limit": limit, "total": total,
+                "pages": max(1, math.ceil(total / limit))}
 
-    def test_database_write(self, path: str, data: dict, auth: dict) -> None:
-        parts = path.removeprefix("/api/test-databases/").split("/")
-        if len(parts) != 2:
-            raise APIError(404, "not_found")
-        db_key, table = parts
-        db_path, _ = self._test_db_spec(db_key, table)
+    def backup_primary_database(self, module: str, db_path: Path) -> None:
+        backup_dir = DATA_DIR / "primary-database-backups"
+        backup_dir.mkdir(parents=True, exist_ok=True)
+        day = time.strftime("%Y%m%d", time.localtime())
+        backup_path = backup_dir / f"{module}-{day}.db"
+        if backup_path.exists():
+            return
+        temporary = backup_path.with_suffix(".db.tmp")
+        try:
+            source = sqlite3.connect(db_path, timeout=15)
+            target = sqlite3.connect(temporary, timeout=15)
+            try:
+                source.backup(target)
+            finally:
+                target.close()
+                source.close()
+            temporary.replace(backup_path)
+        finally:
+            if temporary.exists():
+                temporary.unlink()
+
+    def primary_database_write(self, module: str, data: dict, auth: dict) -> None:
+        db_path, table = self._primary_db_spec(module)
+        self.backup_primary_database(module, db_path)
         quoted = '"' + table.replace('"', '""') + '"'
         item_id = data.get("id")
-        with sqlite3.connect(db_path) as db:
+        if item_id is not None and (isinstance(item_id, bool) or not str(item_id).isdigit()):
+            raise APIError(400, "invalid_record_id")
+        with sqlite3.connect(db_path, timeout=15) as db:
             db.row_factory = sqlite3.Row
-            columns, primary = self._test_db_schema(db, table)
-            column_types = {c["name"]: str(c["type"]).upper() for c in columns}
-            allowed = {c["name"] for c in columns if c["name"] != primary}
+            columns, primary = self._primary_db_schema(db, table)
+            by_name = {c["name"]: c for c in columns}
             changes = {}
             for key, value in data.items():
-                if key not in allowed:
+                if key not in by_name or key == primary:
                     continue
-                if "BLOB" in column_types[key]:
+                column = by_name[key]
+                if key == "proof" or "BLOB" in str(column["type"]).upper():
                     if not isinstance(value, str):
                         raise APIError(400, "invalid_blob")
                     try:
@@ -662,62 +670,65 @@ class Handler(BaseHTTPRequestHandler):
                     changes[key] = clean_value(value)
             if not changes:
                 raise APIError(400, "empty_record")
+            if item_id is None:
+                missing = [
+                    col["name"] for col in columns
+                    if col["notnull"] and col["dflt_value"] is None and not col["pk"]
+                    and (col["name"] not in changes or changes[col["name"]] in (None, ""))
+                ]
+                if missing:
+                    raise APIError(400, "required_fields",
+                                   "Заполните обязательные поля: " + ", ".join(missing))
             if item_id is not None:
                 before_row = db.execute(
-                    f"SELECT * FROM {quoted} WHERE {chr(34)+primary+chr(34)}=?", (item_id,)
+                    f'SELECT * FROM {quoted} WHERE "{primary}"=?', (item_id,)
                 ).fetchone()
                 if not before_row:
                     raise APIError(404, "not_found")
-                before = {k: (f"[BLOB · {len(v)} байт]" if isinstance(v, bytes) else v)
+                before = {k: self._primary_db_value(by_name[k], v)
                           for k, v in dict(before_row).items()}
-                assignments = ", ".join('"' + k.replace('"','""') + '"=?' for k in changes)
-                db.execute(f"UPDATE {quoted} SET {assignments} WHERE {chr(34)+primary+chr(34)}=?",
+                assignments = ", ".join('"' + k.replace('"', '""') + '"=?' for k in changes)
+                db.execute(f'UPDATE {quoted} SET {assignments} WHERE "{primary}"=?',
                            (*changes.values(), item_id))
-                action = "update"
-                object_id = str(item_id)
+                object_id, action = str(item_id), "update"
             else:
                 names = list(changes)
-                quoted_names = ", ".join('"' + k.replace('"','""') + '"' for k in names)
+                quoted_names = ", ".join('"' + k.replace('"', '""') + '"' for k in names)
                 marks = ", ".join("?" for _ in names)
                 cursor = db.execute(f"INSERT INTO {quoted} ({quoted_names}) VALUES ({marks})",
                                     list(changes.values()))
-                object_id = str(cursor.lastrowid)
-                before = None
-                action = "create"
+                object_id, action, before = str(cursor.lastrowid), "create", None
             after_row = db.execute(
-                f"SELECT * FROM {quoted} WHERE {chr(34)+primary+chr(34)}=?", (object_id,)
+                f'SELECT * FROM {quoted} WHERE "{primary}"=?', (object_id,)
             ).fetchone()
-            after = {k: (f"[BLOB · {len(v)} байт]" if isinstance(v, bytes) else v)
+            after = {k: self._primary_db_value(by_name[k], v)
                      for k, v in dict(after_row).items()}
         db.close()
         with connect() as audit_db:
             audit(audit_db, auth["id"], auth["username"], action,
-                  f"testdb:{db_key}/{table}", object_id, before, after, self.ip())
+                  module, object_id, before, after, self.ip())
         self.send_json(200, {"item": after})
 
-    def test_database_delete(self, path: str, auth: dict) -> None:
-        parts = path.removeprefix("/api/test-databases/").split("/")
-        if len(parts) != 3 or not parts[2].isdigit():
-            raise APIError(404, "not_found")
-        db_key, table, raw_id = parts
-        db_path, _ = self._test_db_spec(db_key, table)
+    def primary_database_delete(self, module: str, raw_id: str, auth: dict) -> None:
+        db_path, table = self._primary_db_spec(module)
+        self.backup_primary_database(module, db_path)
         quoted = '"' + table.replace('"', '""') + '"'
-        with sqlite3.connect(db_path) as db:
+        with sqlite3.connect(db_path, timeout=15) as db:
             db.row_factory = sqlite3.Row
-            _, primary = self._test_db_schema(db, table)
-            row = db.execute(f"SELECT * FROM {quoted} WHERE {chr(34)+primary+chr(34)}=?",
+            columns, primary = self._primary_db_schema(db, table)
+            by_name = {c["name"]: c for c in columns}
+            row = db.execute(f'SELECT * FROM {quoted} WHERE "{primary}"=?',
                              (int(raw_id),)).fetchone()
             if not row:
                 raise APIError(404, "not_found")
-            before = {k: (f"[BLOB · {len(v)} байт]" if isinstance(v, bytes) else v)
+            before = {k: self._primary_db_value(by_name[k], v)
                       for k, v in dict(row).items()}
-            db.execute(f"DELETE FROM {quoted} WHERE {chr(34)+primary+chr(34)}=?",
-                       (int(raw_id),))
+            db.execute(f'DELETE FROM {quoted} WHERE "{primary}"=?', (int(raw_id),))
         db.close()
         with connect() as audit_db:
             audit(audit_db, auth["id"], auth["username"], "delete",
-                  f"testdb:{db_key}/{table}", raw_id, before, None, self.ip())
-        return self.send_json(200, {"ok": True})
+                  module, raw_id, before, None, self.ip())
+        self.send_json(200, {"ok": True})
 
     def list_admins(self) -> list[dict]:
         with connect() as db:
@@ -857,22 +868,22 @@ class Handler(BaseHTTPRequestHandler):
             if not user_row:
                 raise APIError(404, "not_found")
             user = {"id": user_row["id"], **json.loads(user_row["data"])}
+            nick = str(user.get("nick", "")).strip()
             details: dict[str, object] = {"lots": 0, "shops": 0, "complaints": 0, "support": 0}
-            nick = str(user.get("nick", "")).lower()
-            for module, key in (("lots", "seller"), ("shops", "owner"),
-                                ("complaints", "target"), ("support", "from")):
-                details[key] = 0
+            for module, key in (("lots", "seller"), ("shops", "owner")):
                 rows = db.execute("SELECT data FROM records WHERE module=?", (module,)).fetchall()
-                count = sum(
+                details[module] = sum(
                     1 for row in rows
-                    if nick and nick in str(json.loads(row["data"]).get(key, "")).lower()
+                    if nick and nick.casefold() in str(json.loads(row["data"]).get(key, "")).casefold()
                 )
-                details[key] = count
-            details["lots"] = details.pop("seller")
-            details["shops"] = details.pop("owner")
-            details["complaints"] = details.pop("target")
-            details["support"] = details.pop("from")
-            details["demo_data"] = True
+        for module in ("support", "complaints"):
+            db_path, table = self._primary_db_spec(module)
+            with sqlite3.connect(db_path, timeout=15) as source:
+                details[module] = source.execute(
+                    f'SELECT COUNT(*) FROM "{table}" WHERE CAST(user_id AS TEXT)=? '
+                    'OR lower(user_name)=lower(?)',
+                    (str(user["id"]), nick),
+                ).fetchone()[0]
         return {"user": user, "activity": details}
 
     def statistics(self) -> list[list[object]]:
@@ -949,10 +960,20 @@ class Handler(BaseHTTPRequestHandler):
         tables = {}
         with connect() as db:
             for module in ("users", "lots", "shops", "news", "support", "complaints"):
-                row = db.execute(
-                    "SELECT data FROM records WHERE module=? LIMIT 1", (module,)
-                ).fetchone()
-                tables[module] = sorted(json.loads(row["data"]).keys()) if row else []
+                if module in PRIMARY_DATABASES:
+                    db_path, table = self._primary_db_spec(module)
+                    source = sqlite3.connect(db_path)
+                    try:
+                        tables[module] = [
+                            row[1] for row in source.execute(f'PRAGMA table_info("{table}")')
+                        ]
+                    finally:
+                        source.close()
+                else:
+                    row = db.execute(
+                        "SELECT data FROM records WHERE module=? LIMIT 1", (module,)
+                    ).fetchone()
+                    tables[module] = sorted(json.loads(row["data"]).keys()) if row else []
             saved = {
                 row["field_key"]: row["meaning"]
                 for row in db.execute("SELECT field_key,meaning FROM scan_preferences")
@@ -963,8 +984,6 @@ class Handler(BaseHTTPRequestHandler):
         specifications = [
             ("remove_fake_lots", "Удалить фейковые лоты", "lots", "fake"),
             ("restore_hidden_lots", "Вернуть скрытые лоты", "lots", "hidden"),
-            ("close_support", "Закрыть обращения поддержки", "support", "open"),
-            ("reject_new_complaints", "Отклонить новые жалобы", "complaints", "new"),
         ]
         result = []
         with connect() as db:
@@ -1017,15 +1036,13 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/bulk":
                 require_module(auth, "bulk")
                 return self.run_bulk(data, auth)
-            if path.startswith("/api/test-databases/"):
-                if auth["role"] != "super":
-                    raise APIError(403, "forbidden")
-                return self.test_database_write(path, data, auth)
             parts = path.removeprefix("/api/").split("/")
             module = parts[0]
             if module not in MODULES:
                 raise APIError(404, "not_found")
             require_module(auth, module)
+            if module in PRIMARY_DATABASES:
+                return self.primary_database_write(module, data, auth)
             if module == "admins":
                 return self.admin_write(data, auth)
             if module == "assistant":
@@ -1231,8 +1248,6 @@ class Handler(BaseHTTPRequestHandler):
         specs = {
             "remove_fake_lots": ("lots", lambda row: bool(row.get("fake")), "delete"),
             "restore_hidden_lots": ("lots", lambda row: row.get("status") == "hidden", "update"),
-            "close_support": ("support", lambda row: row.get("status") in {"new", "in_work", "open"}, "close"),
-            "reject_new_complaints": ("complaints", lambda row: row.get("status") == "new", "reject"),
         }
         module, matches, action = specs[operation]
         affected = 0
@@ -1398,15 +1413,13 @@ class Handler(BaseHTTPRequestHandler):
         try:
             path = urlparse(self.path).path
             auth = self.require_auth(csrf=True)
-            if path.startswith("/api/test-databases/"):
-                if auth["role"] != "super":
-                    raise APIError(403, "forbidden")
-                return self.test_database_delete(path, auth)
             parts = path.removeprefix("/api/").split("/")
             if len(parts) != 2 or parts[0] not in MODULES or not parts[1].isdigit():
                 raise APIError(404, "not_found")
             module, raw_id = parts
             require_module(auth, module)
+            if module in PRIMARY_DATABASES:
+                return self.primary_database_delete(module, raw_id, auth)
             if module in {"admins", "audit", "scan", "refunds"}:
                 raise APIError(403, "disabled", "Удаление в этом разделе запрещено.")
             with connect() as db:

@@ -4,3 +4,6 @@ data/
 
 # Local source databases may contain private production/test records.
 /db/
+
+# Retired generated demo copies; primary databases live in /db/ and stay local.
+/test_databases/
