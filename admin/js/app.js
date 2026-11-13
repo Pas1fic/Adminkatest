@@ -135,8 +135,8 @@ function open(k){
  const box=h('div');shell(SEC[k].t,box);({bulk,assistant,profit,stats,scan}[k]||listView)(k,box)
 }
 async function unlockProfit(){
- formDlg('Подтвердите пароль',{password:'password'},{password:'Пароль'}, {},async data=>{
-  try{await API.reauthenticate(data.password);const box=h('div');shell(SEC.profit.t,box);profit('profit',box)}
+ formDlg('\u0412\u0432\u0435\u0434\u0438\u0442\u0435 \u043e\u0442\u0434\u0435\u043b\u044c\u043d\u044b\u0439 \u043a\u043e\u0434 \u0434\u043e\u0441\u0442\u0443\u043f\u0430',{code:'password'},{code:'\u041a\u043e\u0434 \u0434\u043e\u0441\u0442\u0443\u043f\u0430'}, {},async data=>{
+  try{await API.reauthenticate(data.code);const box=h('div');shell(SEC.profit.t,box);profit('profit',box)}
   catch(e){if(e.message.includes('Сессия'))fail(e);else toast(e.message);return false}
  })
 }

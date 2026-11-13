@@ -17,6 +17,8 @@ py -3 app.py
 
 Откройте <http://127.0.0.1:7070/admin/>. При первом запуске создаются служебная SQLite-база `data/admin.sqlite3`, супер-администратор и небольшие демонстрационные записи для тех модулей, у которых нет подключённого источника. Начальный пароль задаётся только через `ADMIN_PASSWORD`; тестовые пароли, открытые в коде или передаваемые в браузерные хранилища, не используются.
 
+
+The Profit tab has a separate randomly generated access code (not the super-admin password and not the login OTP). It is created on first startup; only its salted hash is stored in `data/admin.sqlite3`. The plaintext code is printed once in the backend console as `[ONE-TIME SETUP] Profit access code`. Save it securely; the app will not display it again. Successful verification unlocks the tab for five minutes.
 В `APP_ENV=development` код одноразового входа выводится **только в консоль процесса backend**. Для отправки OTP по email настройте SMTP:
 
 ```powershell

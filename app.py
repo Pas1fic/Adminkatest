@@ -241,6 +241,12 @@ def init_db() -> None:
                 expires INTEGER NOT NULL,
                 attempts INTEGER NOT NULL DEFAULT 0
             );
+            CREATE TABLE IF NOT EXISTS profit_access(
+                id INTEGER PRIMARY KEY CHECK(id=1),
+                code_hash TEXT NOT NULL,
+                salt TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            );
             CREATE TABLE IF NOT EXISTS audit(
                 id INTEGER PRIMARY KEY,
                 actor_id INTEGER,
@@ -304,6 +310,14 @@ def init_db() -> None:
             )
             (LOG_DIR / f"admin-{cursor.lastrowid}.txt").parent.mkdir(parents=True, exist_ok=True)
             (LOG_DIR / f"admin-{cursor.lastrowid}.txt").touch(mode=0o600, exist_ok=True)
+        if db.execute("SELECT COUNT(*) FROM profit_access").fetchone()[0] == 0:
+            profit_code = secrets.token_urlsafe(18)
+            profit_hash, profit_salt = hash_password(profit_code)
+            db.execute(
+                "INSERT INTO profit_access(id,code_hash,salt,created_at) VALUES(1,?,?,?)",
+                (profit_hash, profit_salt, now()),
+            )
+            print(f"[ONE-TIME SETUP] Profit access code: {profit_code}", flush=True)
         if db.execute("SELECT COUNT(*) FROM records").fetchone()[0] == 0:
             seed(db)
 
@@ -1332,18 +1346,17 @@ class Handler(BaseHTTPRequestHandler):
         if auth["role"] != "super":
             raise APIError(403, "forbidden")
         with connect() as db:
-            row = db.execute("SELECT password_hash,salt FROM admins WHERE id=?", (auth["id"],)).fetchone()
-            password = str(data.get("password", ""))[:1024]
-            if not row or not password_matches(password, row["salt"], row["password_hash"]):
+            row = db.execute("SELECT code_hash,salt FROM profit_access WHERE id=1").fetchone()
+            code = str(data.get("code", ""))[:256]
+            valid = bool(row and password_matches(code, row["salt"], row["code_hash"]))
+            if not valid:
                 audit(db, auth["id"], auth["username"], "reauth_failed", "profit", ip=self.ip())
-                valid = False
             else:
-                valid = True
                 unlocked_until = int(time.time()) + 300
                 db.execute("UPDATE sessions SET profit_until=? WHERE id=?", (unlocked_until, auth["sid"]))
                 audit(db, auth["id"], auth["username"], "reauth_success", "profit", ip=self.ip())
         if not valid:
-            raise APIError(401, "invalid_credentials", "Неверный пароль.")
+            raise APIError(401, "invalid_credentials", "\u041d\u0435\u0432\u0435\u0440\u043d\u044b\u0439 \u043a\u043e\u0434 \u0434\u043e\u0441\u0442\u0443\u043f\u0430.")
         self.send_json(200, {"ok": True, "expires_in": 300})
 
     def record_write(self, module: str, data: dict, auth: dict) -> None:

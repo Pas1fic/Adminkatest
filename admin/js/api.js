@@ -55,8 +55,8 @@ const API=(()=>{
   async save(module,id,values){
    await request(`/api/${moduleName(module)}`,{method:'POST',body:{...values,id}});
   },
-  async reauthenticate(password){
-   await request('/api/auth/reauth',{method:'POST',body:{password}});
+  async reauthenticate(code){
+   await request('/api/auth/reauth',{method:'POST',body:{code}});
   },
   async add(module,values){
    await request(`/api/${moduleName(module)}`,{method:'POST',body:values});
