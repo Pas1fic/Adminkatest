@@ -1,3 +1,6 @@
 __pycache__/
 *.py[cod]
 data/
+
+# Local source databases may contain private production/test records.
+/db/

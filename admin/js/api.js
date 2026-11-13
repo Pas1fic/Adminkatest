@@ -92,6 +92,22 @@ const API=(()=>{
   async sendNewsletter(subject,body){
    return request('/api/newsletter/send',{method:'POST',body:{subject,body}});
   },
+  async testDbDatabases(){return request('/api/test-databases')},
+  async testDbTable(database,table,options={}){
+   const params=new URLSearchParams({page:String(options.page||1)});
+   if(options.q)params.set('q',options.q);
+   return request('/api/test-databases/'+encodeURIComponent(database)+'/'+encodeURIComponent(table)+'?'+params);
+  },
+  async testDbSave(database,table,values){
+   return request('/api/test-databases/'+encodeURIComponent(database)+'/'+encodeURIComponent(table),{method:'POST',body:values});
+  },
+  async testDbDelete(database,table,id){
+   const headers={'Accept':'application/json','X-CSRF-Token':csrf};
+   const response=await fetch('/api/test-databases/'+encodeURIComponent(database)+'/'+encodeURIComponent(table)+'/'+encodeURIComponent(id),{method:'DELETE',headers,credentials:'same-origin'});
+   const result=await response.json().catch(()=>({}));
+   if(!response.ok)throw error(result.message||result.error||'Ошибка удаления',response.status);
+   lastAction=Date.now();return result;
+  },
   async downloadAdminLog(id){
    const response=await fetch(`/api/admin-logs/${id}.txt`,{credentials:'same-origin'});
    if(!response.ok)throw error('Не удалось скачать журнал',response.status);

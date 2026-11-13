@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import getpass
 import hashlib
 import hmac
@@ -25,7 +26,7 @@ DATA_DIR = Path(os.environ.get("ADMIN_DATA_DIR", ROOT / "data")).resolve()
 DB_PATH = Path(os.environ.get("ADMIN_DB", DATA_DIR / "admin.sqlite3")).resolve()
 LOG_DIR = DATA_DIR / "admin-logs"
 HOST = os.environ.get("ADMIN_HOST", "127.0.0.1")
-PORT = int(os.environ.get("ADMIN_PORT", "8080"))
+PORT = int(os.environ.get("ADMIN_PORT", "7070"))
 SESSION_MINUTES = int(os.environ.get("SESSION_MINUTES", "30"))
 OTP_TTL = int(os.environ.get("OTP_TTL_SECONDS", "600"))
 APP_ENV = os.environ.get("APP_ENV", "development")
@@ -33,10 +34,18 @@ COOKIE_SECURE = os.environ.get("COOKIE_SECURE") == "1"
 MAX_BODY = 2_500_000
 PAGE_SIZE = 10
 
+# Fixed allowlist: browser input can never choose an arbitrary database path.
+TEST_DATABASES = {
+    "news": {"title": "Новости", "file": "news.db", "tables": ["news"]},
+    "support": {"title": "Поддержка", "file": "profile_support.db", "tables": ["support_messages"]},
+    "yammer": {"title": "Жалобы", "file": "profile_yammer.db", "tables": ["yammer_messages"]},
+}
+TEST_DB_DIR = Path(os.environ.get("ADMIN_TEST_DB_DIR", ROOT / "test_databases")).resolve()
+
 MODULES = {
     "users", "lots", "shops", "news", "support", "complaints", "banners",
     "currencies", "newsletter", "transactions", "promotion", "refunds",
-    "profit", "stats", "audit", "admins", "scan", "bulk", "assistant",
+    "profit", "stats", "audit", "admins", "scan", "bulk", "assistant", "testdb",
 }
 ADMIN_MODULES = {"users", "lots", "shops", "news", "support", "complaints"}
 SUPER_MODULES = MODULES - ADMIN_MODULES
@@ -497,6 +506,12 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.write(body)
             return
 
+        if path == "/api/test-databases" or path.startswith("/api/test-databases/"):
+            auth = self.require_auth()
+            if auth["role"] != "super":
+                raise APIError(403, "forbidden")
+            return self.test_database_get(path)
+
         auth = self.require_auth()
         parts = path.removeprefix("/api/").split("/")
         module = parts[0]
@@ -537,6 +552,172 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_json(200, self.user_detail(parts[1]))
         query = parse_qs(urlparse(self.path).query)
         return self.send_json(200, self.list_records(module, query))
+
+    @staticmethod
+    def _test_db_spec(db_key: str, table: str | None = None) -> tuple[Path, str | None]:
+        spec = TEST_DATABASES.get(db_key)
+        if not spec or (table is not None and table not in spec["tables"]):
+            raise APIError(404, "test_database_not_found")
+        path = (TEST_DB_DIR / spec["file"]).resolve()
+        if TEST_DB_DIR.resolve() not in path.parents or not path.is_file():
+            raise APIError(404, "test_database_file_missing")
+        return path, table
+
+    @staticmethod
+    def _test_db_schema(db: sqlite3.Connection, table: str) -> tuple[list[dict], str]:
+        # table is validated against TEST_DATABASES before reaching this method.
+        quoted = '"' + table.replace('"', '""') + '"'
+        columns = [dict(row) for row in db.execute(f"PRAGMA table_info({quoted})")]
+        if not columns:
+            raise APIError(404, "test_database_table_missing")
+        primary = next((col["name"] for col in columns if col["pk"]), "")
+        if not primary:
+            raise APIError(400, "test_database_primary_key_required")
+        return columns, primary
+
+    def test_database_get(self, path: str) -> None:
+        parts = path.removeprefix("/api/test-databases").strip("/").split("/")
+        if not parts or parts == [""]:
+            return self.send_json(200, {"databases": [
+                {"id": key, "title": spec["title"], "file": spec["file"],
+                 "tables": spec["tables"]}
+                for key, spec in TEST_DATABASES.items()
+            ]})
+        db_key = parts[0]
+        if len(parts) == 1:
+            self._test_db_spec(db_key)
+            spec = TEST_DATABASES[db_key]
+            return self.send_json(200, {"id": db_key, "title": spec["title"],
+                                        "file": spec["file"], "tables": spec["tables"]})
+        if len(parts) != 2:
+            raise APIError(404, "not_found")
+        db_path, table = self._test_db_spec(db_key, parts[1])
+        query = parse_qs(urlparse(self.path).query)
+        try:
+            page = max(1, min(100000, int((query.get("page") or ["1"])[0])))
+        except ValueError as exc:
+            raise APIError(400, "invalid_pagination") from exc
+        search = (query.get("q") or [""])[0].strip().casefold()
+        quoted = '"' + table.replace('"', '""') + '"'
+        with sqlite3.connect(db_path) as db:
+            db.row_factory = sqlite3.Row
+            columns, primary = self._test_db_schema(db, table)
+            searchable = [c["name"] for c in columns if "BLOB" not in str(c["type"]).upper()]
+            where, params = "", []
+            if search and searchable:
+                where = " WHERE " + " OR ".join(
+                    f"lower(CAST({chr(34)+name.replace(chr(34), chr(34)*2)+chr(34)} AS TEXT)) LIKE ?"
+                    for name in searchable
+                )
+                params = [f"%{search}%"] * len(searchable)
+            total = db.execute(f"SELECT COUNT(*) FROM {quoted}{where}", params).fetchone()[0]
+            rows = db.execute(
+                f"SELECT * FROM {quoted}{where} ORDER BY {chr(34)+primary+chr(34)} DESC LIMIT ? OFFSET ?",
+                (*params, PAGE_SIZE, (page - 1) * PAGE_SIZE),
+            ).fetchall()
+            items = []
+            for row in rows:
+                item = {}
+                for col in columns:
+                    value = row[col["name"]]
+                    if isinstance(value, bytes):
+                        value = f"[BLOB · {len(value)} байт]" if value else "[BLOB · пусто]"
+                    item[col["name"]] = value
+                items.append(item)
+        db.close()
+        visible = [{"name": c["name"], "type": c["type"], "notnull": bool(c["notnull"]),
+                    "default": c["dflt_value"], "pk": bool(c["pk"]),
+                    "editable": not bool(c["pk"]),
+                    "input_type": "blob" if "BLOB" in str(c["type"]).upper() else "area"}
+                   for c in columns]
+        return self.send_json(200, {"items": items, "columns": visible, "primary_key": primary,
+                                    "page": page, "limit": PAGE_SIZE, "total": total,
+                                    "pages": max(1, math.ceil(total / PAGE_SIZE))})
+
+    def test_database_write(self, path: str, data: dict, auth: dict) -> None:
+        parts = path.removeprefix("/api/test-databases/").split("/")
+        if len(parts) != 2:
+            raise APIError(404, "not_found")
+        db_key, table = parts
+        db_path, _ = self._test_db_spec(db_key, table)
+        quoted = '"' + table.replace('"', '""') + '"'
+        item_id = data.get("id")
+        with sqlite3.connect(db_path) as db:
+            db.row_factory = sqlite3.Row
+            columns, primary = self._test_db_schema(db, table)
+            column_types = {c["name"]: str(c["type"]).upper() for c in columns}
+            allowed = {c["name"] for c in columns if c["name"] != primary}
+            changes = {}
+            for key, value in data.items():
+                if key not in allowed:
+                    continue
+                if "BLOB" in column_types[key]:
+                    if not isinstance(value, str):
+                        raise APIError(400, "invalid_blob")
+                    try:
+                        changes[key] = base64.b64decode(value, validate=True)
+                    except (ValueError, base64.binascii.Error) as exc:
+                        raise APIError(400, "invalid_blob") from exc
+                else:
+                    changes[key] = clean_value(value)
+            if not changes:
+                raise APIError(400, "empty_record")
+            if item_id is not None:
+                before_row = db.execute(
+                    f"SELECT * FROM {quoted} WHERE {chr(34)+primary+chr(34)}=?", (item_id,)
+                ).fetchone()
+                if not before_row:
+                    raise APIError(404, "not_found")
+                before = {k: (f"[BLOB · {len(v)} байт]" if isinstance(v, bytes) else v)
+                          for k, v in dict(before_row).items()}
+                assignments = ", ".join('"' + k.replace('"','""') + '"=?' for k in changes)
+                db.execute(f"UPDATE {quoted} SET {assignments} WHERE {chr(34)+primary+chr(34)}=?",
+                           (*changes.values(), item_id))
+                action = "update"
+                object_id = str(item_id)
+            else:
+                names = list(changes)
+                quoted_names = ", ".join('"' + k.replace('"','""') + '"' for k in names)
+                marks = ", ".join("?" for _ in names)
+                cursor = db.execute(f"INSERT INTO {quoted} ({quoted_names}) VALUES ({marks})",
+                                    list(changes.values()))
+                object_id = str(cursor.lastrowid)
+                before = None
+                action = "create"
+            after_row = db.execute(
+                f"SELECT * FROM {quoted} WHERE {chr(34)+primary+chr(34)}=?", (object_id,)
+            ).fetchone()
+            after = {k: (f"[BLOB · {len(v)} байт]" if isinstance(v, bytes) else v)
+                     for k, v in dict(after_row).items()}
+        db.close()
+        with connect() as audit_db:
+            audit(audit_db, auth["id"], auth["username"], action,
+                  f"testdb:{db_key}/{table}", object_id, before, after, self.ip())
+        self.send_json(200, {"item": after})
+
+    def test_database_delete(self, path: str, auth: dict) -> None:
+        parts = path.removeprefix("/api/test-databases/").split("/")
+        if len(parts) != 3 or not parts[2].isdigit():
+            raise APIError(404, "not_found")
+        db_key, table, raw_id = parts
+        db_path, _ = self._test_db_spec(db_key, table)
+        quoted = '"' + table.replace('"', '""') + '"'
+        with sqlite3.connect(db_path) as db:
+            db.row_factory = sqlite3.Row
+            _, primary = self._test_db_schema(db, table)
+            row = db.execute(f"SELECT * FROM {quoted} WHERE {chr(34)+primary+chr(34)}=?",
+                             (int(raw_id),)).fetchone()
+            if not row:
+                raise APIError(404, "not_found")
+            before = {k: (f"[BLOB · {len(v)} байт]" if isinstance(v, bytes) else v)
+                      for k, v in dict(row).items()}
+            db.execute(f"DELETE FROM {quoted} WHERE {chr(34)+primary+chr(34)}=?",
+                       (int(raw_id),))
+        db.close()
+        with connect() as audit_db:
+            audit(audit_db, auth["id"], auth["username"], "delete",
+                  f"testdb:{db_key}/{table}", raw_id, before, None, self.ip())
+        return self.send_json(200, {"ok": True})
 
     def list_admins(self) -> list[dict]:
         with connect() as db:
@@ -836,6 +1017,10 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/bulk":
                 require_module(auth, "bulk")
                 return self.run_bulk(data, auth)
+            if path.startswith("/api/test-databases/"):
+                if auth["role"] != "super":
+                    raise APIError(403, "forbidden")
+                return self.test_database_write(path, data, auth)
             parts = path.removeprefix("/api/").split("/")
             module = parts[0]
             if module not in MODULES:
@@ -1213,6 +1398,10 @@ class Handler(BaseHTTPRequestHandler):
         try:
             path = urlparse(self.path).path
             auth = self.require_auth(csrf=True)
+            if path.startswith("/api/test-databases/"):
+                if auth["role"] != "super":
+                    raise APIError(403, "forbidden")
+                return self.test_database_delete(path, auth)
             parts = path.removeprefix("/api/").split("/")
             if len(parts) != 2 or parts[0] not in MODULES or not parts[1].isdigit():
                 raise APIError(404, "not_found")

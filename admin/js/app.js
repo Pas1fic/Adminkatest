@@ -25,6 +25,7 @@ function formDlg(title,fields,labels,vals,ok){
   else if(t=='bool'){el=h('input',{type:'checkbox'});el.checked=!!vals[k]}
   else if(t=='area'){el=h('textarea',{rows:4,required});el.value=vals[k]??''}
   else if(t=='image'){el=h('input',{type:'file',accept:'image/*'});}
+  else if(t=='blob'){el=h('input',{type:'file'});}
   else{el=h('input',{type:t||'text',required});el.value=vals[k]??''}
   const fieldLabel=labels[k]||({image_data:'Изображение (уменьшится и сохранится в Base64)',
    password:'Пароль администратора',sections:'Разрешённые разделы через запятую'}[k]||k);
@@ -36,12 +37,14 @@ function formDlg(title,fields,labels,vals,ok){
     if(t=='bool')p[k]=v.checked;
     else if(t=='number')p[k]=Number(v.value);
     else if(t=='image'&&v.files[0])p[k]=await resizeImage(v.files[0]);
-    else if(t!='image')p[k]=v.value.trim()}
+    else if(t=='blob'&&v.files[0])p[k]=await readBinaryFile(v.files[0]);
+    else if(t!='image'&&t!='blob')p[k]=v.value.trim()}
    if(await ok(p)!==false)d.close()
   }catch(error){errorMessage.textContent=error.message||'Не удалось сохранить данные.'}
  }},h('h3',{},title),rows,errorMessage,
   h('div',{class:'row'},h('button',{type:'button',class:'btn t',onclick:()=>d.close()},'Отмена'),h('button',{class:'btn'},'Сохранить'))));
 }
+function readBinaryFile(file){return new Promise((resolve,reject)=>{const r=new FileReader();r.onerror=()=>reject(new Error('Не удалось прочитать файл.'));r.onload=()=>resolve(String(r.result).split(',')[1]||'');r.readAsDataURL(file)})}
 function resizeImage(file){return new Promise((resolve,reject)=>{
  const reader=new FileReader();reader.onerror=()=>reject(new Error('Не удалось прочитать изображение.'));
  reader.onload=()=>{const image=new Image();image.onerror=()=>reject(new Error('Некорректное изображение.'));
@@ -91,7 +94,7 @@ const GROUPS=[
 ];
 const ADMIN_HOME=['users','lots','news','complaints','support','shops'];
 const MODULE_PAGES={promotion:'finance',profit:'finance',refunds:'finance',stats:'analytics',transactions:'analytics',
- newsletter:'system',journal:'system',admins:'system',scan:'system',bulk:'system',assistant:'system'};
+ newsletter:'system',journal:'system',admins:'system',scan:'system',bulk:'system',assistant:'system',testdb:'system'};
 function moduleTiles(keys){return h('div',{class:'tiles'},keys.filter(k=>API.can(k)).map(k=>{
  const s=SEC[k];return h('button',{class:'tile',onclick:()=>location.href='/admin/'+(GROUPS.find(g=>g.items.includes(k))?.page||MODULE_PAGES[k]||'')+'/index.html?module='+encodeURIComponent(k)},h('span',{class:'ic'},s.i),s.t)
 }))}
@@ -107,7 +110,7 @@ function menu(){
   h('h2',{class:'section-title'},'Инструменты администратора'),
   h('div',{class:'tiles'},[...moduleTiles(other).children,locked])),false)
 }
-function pageMenu(){if(document.body.dataset.adminPage){route()}else menu()}
+function pageMenu(){location.href='/admin/'}
 function route(){
  const page=document.body.dataset.adminPage;
  if(!page)return menu();
@@ -128,6 +131,7 @@ function route(){
 }
 function open(k){
  if(k==='profit')return unlockProfit();
+ if(k==='testdb'){const box=h('div');shell(SEC.testdb.t,box);return testDatabases(k,box)}
  const box=h('div');shell(SEC[k].t,box);({bulk,assistant,profit,stats,scan,newsletter}[k]||listView)(k,box)
 }
 async function unlockProfit(){
@@ -174,6 +178,60 @@ function listView(k,box){
 }
 
 /* ---------- Особые разделы ---------- */
+async function testDatabases(k,box){
+ const root=h('section',{class:'card'}),bar=h('div',{class:'bar'}),tableWrap=h('div',{class:'tw'}),pages=h('div',{class:'pg'});
+ const dbSelect=h('select',{'aria-label':'Тестовая база'}),tableSelect=h('select',{'aria-label':'Таблица'});
+ const search=h('input',{type:'search',placeholder:'Поиск по полям таблицы'}),hint=h('p',{class:'mt'});
+ let dbs=[],schema=null,page=1,term='',activeDb='',activeTable='';
+ const button=(label,fn,cls='btn t')=>h('button',{class:cls,onclick:fn},label);
+ const load=async()=>{
+  try{
+   const result=await API.testDbTable(activeDb,activeTable,{page:page,q:term});schema=result;
+   const cols=result.columns||[];
+   const head=h('thead',{},h('tr',{},...cols.map(c=>h('th',{},c.name)),h('th',{},'Действия')));
+   const body=h('tbody',{},...(result.items||[]).map(row=>{
+    const edit=button('Изменить',()=>formDlg('Запись #'+row[result.primary_key],Object.fromEntries(cols.filter(c=>c.editable).map(c=>[c.name,c.input_type==='blob'?'blob':'area'])),Object.fromEntries(cols.map(c=>[c.name,c.name])),row,async values=>{
+     try{await API.testDbSave(activeDb,activeTable,{id:row[result.primary_key],...values});toast('Изменения сохранены');await load()}catch(e){fail(e);return false}
+    }));
+    const del=button('Удалить',async()=>{if(!await ask('Удалить запись #'+row[result.primary_key]+'?'))return;try{await API.testDbDelete(activeDb,activeTable,row[result.primary_key]);toast('Запись удалена');await load()}catch(e){fail(e)}});
+    return h('tr',{},...cols.map(c=>h('td',{},cell(row[c.name]??''))),h('td',{class:'actions'},edit,del));
+   }));
+   if(!result.items?.length)body.append(h('tr',{},h('td',{colspan:cols.length+1},'Записей нет')));
+   tableWrap.replaceChildren(h('table',{},head,body));
+   pages.replaceChildren(button('←',()=>{if(page>1){page--;load()}}),h('span',{},'Страница '+result.page+' из '+result.pages+' · всего '+result.total),button('→',()=>{if(page<result.pages){page++;load()}}));
+   hint.textContent=activeDb+' / '+activeTable+' · '+cols.length+' колонок. BLOB-поля показаны как размер и сохраняются без изменений при редактировании.';
+  }catch(e){fail(e)}
+ };
+ const refreshTables=async()=>{
+  activeDb=dbSelect.value;const found=dbs.find(x=>x.id===activeDb);tableSelect.replaceChildren(...(found?.tables||[]).map(t=>h('option',{value:t},t)));
+  activeTable=tableSelect.value;page=1;await load();
+ };
+ try{
+  const result=await API.testDbDatabases();dbs=result.databases||[];
+  if(!dbs.length){box.append(h('p',{},'Тестовые базы не найдены. Проверьте папку db/.'));return}
+  dbSelect.replaceChildren(...dbs.map(d=>h('option',{value:d.id},d.title+' ('+d.file+')')));
+  bar.append(h('label',{class:'f'},h('span',{},'База данных'),dbSelect),h('label',{class:'f'},h('span',{},'Таблица'),tableSelect),search);
+  const add=button('+ Добавить запись',()=>{
+   const cols=schema?.columns||[],fields=Object.fromEntries(cols.filter(c=>c.editable).map(c=>[c.name,c.input_type==='blob'?'blob':'area']));
+   const defaults=Object.fromEntries(cols.filter(c=>c.editable).map(c=>[c.name,c.default==null||/^(strftime|datetime|date|current_)/i.test(String(c.default))?'':String(c.default).replace(/^'|'$/g,'')]));
+   formDlg('Новая запись',fields,Object.fromEntries(cols.map(c=>[c.name,c.name+(c.input_type==='blob'?' · файл':'')])),defaults,async values=>{
+    const payload={};
+    for(const c of cols.filter(c=>c.editable)){
+     const value=values[c.name];
+     if(value!=='' || (c.notnull && c.default==null))payload[c.name]=value;
+    }
+    const missing=cols.find(c=>c.editable&&c.notnull&&c.default==null&&!String(payload[c.name]??'').trim());
+    if(missing){toast('Заполните обязательное поле: '+missing.name);return false}
+    try{await API.testDbSave(activeDb,activeTable,payload);toast('Запись добавлена');page=1;await load()}catch(e){fail(e);return false}
+   });
+  },'btn');
+  bar.append(add);search.addEventListener('input',()=>{term=search.value;page=1;clearTimeout(search._timer);search._timer=setTimeout(load,250)});
+  dbSelect.addEventListener('change',refreshTables);tableSelect.addEventListener('change',()=>{activeTable=tableSelect.value;page=1;load()});
+  root.append(h('p',{class:'mt'},'Изолированные тестовые SQLite-базы. Основная база панели не изменяется.'),bar,hint,tableWrap,pages);
+  box.append(root);await refreshTables();
+ }catch(e){fail(e)}
+}
+
 async function stats(k,box){try{const r=await API.stats();
  const max=Math.max(1,...r.items.map(([,v])=>Number(v)||0));
  box.append(h('p',{class:'mt'},'Показатели рассчитаны по данным, подключённым к этой демо-базе.'),h('div',{class:'cards'},r.items.map(([l,v])=>h('div',{class:'card st'},h('b',{},v),h('span',{},l),

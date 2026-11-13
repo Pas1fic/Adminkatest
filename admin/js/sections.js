@@ -7,13 +7,14 @@ const CODE='1111'; // первая стадия входа; в реальной 
 const MEAN=['— не указано','ID','Название / имя','Цена / сумма','Дата','Текст','Статус','Служебное, скрыть'];
 const ST3=['new','in_work','closed'];
 const SEC={
+testdb:{t:'Тестовые базы данных',i:'🗄️'},
 users:{t:'Пользователи',i:'👤',q:'никнейму, почте, ID или магазину',c:{id:'ID',nick:'Ник',email:'Почта',balance:'Баланс',status:'Статус',fake:'Фейк',last_login:'Последний вход'},e:{nick:'',email:'email',balance:'number',status:['active','blocked'],fake:'bool',last_login:'date'},f:{status:['active','blocked']}},
 lots:{t:'Лоты',i:'🏷️',q:'название, продавец, ID, категория',c:{id:'ID',title:'Название',seller:'Продавец',price:'Цена',status:'Статус',fake:'Фейк',category:'Категория',subcategory:'Подкатегория',auction_date:'Аукцион'},e:{title:'',seller:'',price:'number',status:['active','hidden','sold'],fake:'bool',category:'',subcategory:'',auction_date:'date'},f:{status:['active','hidden','sold'],fake:['true','false']}},
 news:{t:'Новости',i:'📰',c:{id:'ID',title:'Заголовок',text:'HTML / текст',date:'Дата',status:'Статус'},a:{title:'',text:'area',image_data:'image',date:'date'},e:{title:'',text:'area',image_data:'image',date:'date',status:['draft','published']},del:1},
 support:{t:'Саппорт',i:'🎧',q:'кто, текст',c:{id:'ID',from:'От кого',date:'Дата',status:'Статус',text:'Текст'},e:{status:ST3},f:{status:ST3},dk:'date'},
 banners:{t:'Баннеры',i:'🖼️',c:{id:'ID',place:'Место',title:'Название',from:'С',to:'По',active:'Включён',paid:'Оплачен',amount:'Доход'},a:{place:['category','header','category_header','footer','home_carousel','home_current','mobile_super'],title:'',from:'date',to:'date',active:'bool',paid:'bool',amount:'number'},e:{place:['category','header','category_header','footer','home_carousel','home_current','mobile_super'],title:'',from:'date',to:'date',active:'bool',paid:'bool',amount:'number'},del:1},
 complaints:{t:'Жалобы',i:'⚠️',c:{id:'ID',type:'Тип',target:'Объект',status:'Статус',text:'Текст'},f:{type:['lot','user','shop','message'],status:['new','accepted','rejected','action']},act:[['accept','Принять'],['reject','Отклонить'],['measure','Применить меру']]},
-promo:{t:'Продвижение',i:'⭐',c:{id:'ID',item:'Товар',slot:'Место',until:'До',paid:'Оплачено'},a:{item:'',slot:['Товар дня','Топ выдачи 1','Топ выдачи 2'],until:'date',paid:'number'},del:1},
+promotion:{t:'Продвижение',i:'⭐',c:{id:'ID',item:'Товар',slot:'Место',until:'До',paid:'Оплачено'},a:{item:'',slot:['Товар дня','Топ выдачи 1','Топ выдачи 2'],until:'date',paid:'number'},del:1},
 bulk:{t:'Массовые операции',i:'⚙️'},
 shops:{t:'Магазины',i:'🏬',q:'название, владелец',c:{id:'ID',name:'Название',owner:'Владелец',status:'Статус',promoted:'Продвигается'},e:{name:'',owner:'',status:['active','blocked'],promoted:'bool'},f:{status:['active','blocked']}},
 assistant:{t:'Помощник',i:'💬'},
