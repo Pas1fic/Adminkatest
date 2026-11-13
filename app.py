@@ -15,6 +15,7 @@ import ssl
 import sys
 import time
 from email.message import EmailMessage
+from contextlib import closing
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -46,9 +47,9 @@ PRIMARY_DB_DIR = Path(os.environ.get("ADMIN_PRIMARY_DB_DIR", ROOT / "db")).resol
 MODULES = {
     "users", "lots", "shops", "news", "support", "complaints", "banners",
     "currencies", "newsletter", "transactions", "promotion", "refunds",
-    "profit", "stats", "audit", "admins", "scan", "bulk", "assistant",
+    "profit", "stats", "audit", "admins", "scan", "bulk", "assistant", "project_data",
 }
-ADMIN_MODULES = {"users", "lots", "shops", "news", "support", "complaints"}
+ADMIN_MODULES = {"users", "lots", "shops", "news", "support", "complaints", "currencies", "newsletter"}
 SUPER_MODULES = MODULES - ADMIN_MODULES
 FIELDS = {
     "users": ["id", "nick", "email", "balance", "status", "fake", "last_login", "created_at"],
@@ -240,6 +241,12 @@ def init_db() -> None:
                 expires INTEGER NOT NULL,
                 attempts INTEGER NOT NULL DEFAULT 0
             );
+            CREATE TABLE IF NOT EXISTS profit_access(
+                id INTEGER PRIMARY KEY CHECK(id=1),
+                code_hash TEXT NOT NULL,
+                salt TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            );
             CREATE TABLE IF NOT EXISTS audit(
                 id INTEGER PRIMARY KEY,
                 actor_id INTEGER,
@@ -303,6 +310,14 @@ def init_db() -> None:
             )
             (LOG_DIR / f"admin-{cursor.lastrowid}.txt").parent.mkdir(parents=True, exist_ok=True)
             (LOG_DIR / f"admin-{cursor.lastrowid}.txt").touch(mode=0o600, exist_ok=True)
+        if db.execute("SELECT COUNT(*) FROM profit_access").fetchone()[0] == 0:
+            profit_code = secrets.token_urlsafe(18)
+            profit_hash, profit_salt = hash_password(profit_code)
+            db.execute(
+                "INSERT INTO profit_access(id,code_hash,salt,created_at) VALUES(1,?,?,?)",
+                (profit_hash, profit_salt, now()),
+            )
+            print(f"[ONE-TIME SETUP] Profit access code: {profit_code}", flush=True)
         if db.execute("SELECT COUNT(*) FROM records").fetchone()[0] == 0:
             seed(db)
 
@@ -513,6 +528,14 @@ class Handler(BaseHTTPRequestHandler):
         if module not in MODULES:
             raise APIError(404, "not_found")
         require_module(auth, module)
+        if module in {"users", "lots", "shops", "currencies", "newsletter"}:
+            query = parse_qs(urlparse(self.path).query)
+            return self.send_json(200, self.project_module_get(module, query, auth["role"]))
+        if module == "project_data":
+            if auth["role"] != "super":
+                raise APIError(403, "forbidden", "Project Data is available to the owner account only.")
+            query = parse_qs(urlparse(self.path).query)
+            return self.send_json(200, self.project_data_get(query))
         if module in PRIMARY_DATABASES:
             query = parse_qs(urlparse(self.path).query)
             return self.send_json(200, self.primary_database_get(module, query))
@@ -621,6 +644,152 @@ class Handler(BaseHTTPRequestHandler):
         db.close()
         return {"items": items, "page": page, "limit": limit, "total": total,
                 "pages": max(1, math.ceil(total / limit))}
+
+
+    def project_module_get(self, module: str, query: dict, role: str) -> dict:
+        db_path = (PRIMARY_DB_DIR / "project_data.db").resolve()
+        if PRIMARY_DB_DIR.resolve() not in db_path.parents or not db_path.is_file():
+            raise APIError(503, "project_data_missing", "Missing db/project_data.db.")
+        page = max(1, min(100000, int((query.get("page") or ["1"])[0])))
+        search = (query.get("q") or [""])[0].strip().casefold()
+        limit = 1000 if (query.get("all") or [""])[0] == "1" else PAGE_SIZE
+        offset = 0 if limit == 1000 else (page - 1) * PAGE_SIZE
+        with closing(sqlite3.connect(f"file:{db_path.as_posix()}?mode=ro", uri=True, timeout=15)) as db:
+            db.row_factory = sqlite3.Row
+            if module == "users":
+                # Explicit allowlists: never return credentials, tokens, IPs or device fingerprints.
+                admin_cols = ["id", "name", "surname", "country", "city", "accaunt_type",
+                              "registration_data", "last_visit", "user_rate", "lot_count",
+                              "language", "currency", "user_shop_name"]
+                super_cols = admin_cols + ["patronymic", "email", "mobile", "birthday",
+                                           "adress", "post_index", "last_pay", "last_payment_for_shop",
+                                           "shop_verification", "shop_podcategory"]
+                available = {r[1] for r in db.execute('PRAGMA table_info("users")')}
+                visible = [c for c in (super_cols if role == "super" else admin_cols) if c in available]
+                where, params = "", []
+                if search:
+                    terms = [c for c in ("id", "name", "surname", "email", "mobile", "user_shop_name") if c in visible]
+                    where = " WHERE " + " OR ".join(f'CAST("{c}" AS TEXT) LIKE ?' for c in terms)
+                    params = [f"%{search}%"] * len(terms)
+                total = db.execute(f"SELECT COUNT(*) FROM users{where}", params).fetchone()[0]
+                rows = db.execute(f'SELECT {",".join(chr(34)+c+chr(34) for c in visible)} FROM users{where} ORDER BY id DESC LIMIT ? OFFSET ?', (*params, limit, offset)).fetchall()
+                return {"items": [dict(r) for r in rows], "columns": visible, "page": page, "limit": limit, "total": total, "pages": max(1, math.ceil(total/limit))}
+            if module == "shops":
+                cols = ["id", "name", "surname", "user_shop_name", "shop_description",
+                        "shop_avatar", "shop_banner", "shop_verification", "shop_podcategory",
+                        "country", "city"]
+                if role == "super": cols += ["email", "last_payment_for_shop"]
+                available = {r[1] for r in db.execute('PRAGMA table_info("users")')}
+                cols = [c for c in cols if c in available]
+                where, params = ' WHERE lower(trim(COALESCE(user_shop_name, ""))) NOT IN ("", "none", "null")', []
+                if search:
+                    where += " AND (lower(user_shop_name) LIKE ? OR lower(name) LIKE ? OR CAST(id AS TEXT) LIKE ?)"
+                    params = [f"%{search}%"] * 3
+                total = db.execute(f"SELECT COUNT(*) FROM users{where}", params).fetchone()[0]
+                rows = db.execute(f'SELECT {",".join(chr(34)+c+chr(34) for c in cols)} FROM users{where} ORDER BY id DESC LIMIT ? OFFSET ?', (*params, limit, offset)).fetchall()
+                return {"items": [dict(r) for r in rows], "columns": cols, "page": page, "limit": limit, "total": total, "pages": max(1, math.ceil(total/limit))}
+            if module == "lots":
+                names = [r[0] for r in db.execute("SELECT name FROM sqlite_master WHERE type='table' AND name LIKE '%_category' ORDER BY name")]
+                chosen = (query.get("category") or [""])[0]
+                if chosen and chosen not in names: raise APIError(400, "invalid_category")
+                selected = [chosen] if chosen else names
+                parts, params = [], []
+                for name in selected:
+                    parts.append('SELECT *, ? AS source_category FROM "' + name.replace('"','""') + '"')
+                    params.append(name)
+                union = " UNION ALL ".join(parts)
+                searchable = ["lot_name", "seller_id\t", "lot_category", "lot_podcategory", "lot_description", "current_lot_status"]
+                where, search_params = "", []
+                if search:
+                    where = " WHERE " + " OR ".join(f'lower(CAST("{c}" AS TEXT)) LIKE ?' for c in searchable)
+                    search_params = [f"%{search}%"] * len(searchable)
+                total = db.execute(f"SELECT COUNT(*) FROM ({union}){where}", (*params, *search_params)).fetchone()[0]
+                rows = db.execute(f"SELECT * FROM ({union}){where} ORDER BY id DESC LIMIT ? OFFSET ?", (*params, *search_params, limit, offset)).fetchall()
+                cols = ["id", "lot_name", "seller_id", "lot_category", "lot_podcategory",
+                        "lot_year", "lot_condition", "auction_type", "lot_start_price",
+                        "lot_step", "lot_buy_now", "lot_minimum_bid", "current_price",
+                        "current_lot_status", "lot_description", "lot_country", "lot_city",
+                        "realtime_date", "lot_bids_counter", "lot_view_counter",
+                        "pic1", "pic2", "pic3", "pic4", "pic5", "category_table"]
+                if role == "super":
+                    cols += ["lot_delivery_track_number", "dispute_user_description",
+                             "dispute_seller_description", "seller_lot_confirmation",
+                             "payment_confirmation", "lot_where_is_sold", "lot_give_money"]
+                items = []
+                for row in rows:
+                    d = dict(row); d["category_table"] = d.pop("source_category", ""); d["seller_id"] = d.pop("seller_id\t", d.get("seller_id"))
+                    items.append({k:v for k,v in d.items() if k in cols})
+                return {"items": items, "columns": cols, "categories": [{"name": n, "count": db.execute('SELECT COUNT(*) FROM "'+n+'"').fetchone()[0]} for n in names], "page": page, "limit": limit, "total": total, "pages": max(1, math.ceil(total/limit))}
+            if module == "currencies":
+                row = db.execute('SELECT * FROM currency_converter LIMIT 1').fetchone()
+                names = [c[1] for c in db.execute('PRAGMA table_info("currency_converter")')]
+                items = [{"code": n.upper(), "rate": row[n], "updated": "project_data.db"} for n in names] if row else []
+                if search: items = [x for x in items if search in x["code"].lower()]
+                return {"items": items, "columns": ["code", "rate", "updated"], "page": 1, "limit": limit, "total": len(items), "pages": 1}
+            if module == "newsletter":
+                where, params = (" WHERE lower(mail) LIKE ?", [f"%{search}%"]) if search else ("", [])
+                total = db.execute(f"SELECT COUNT(*) FROM spam_emails{where}", params).fetchone()[0]
+                rows = db.execute(f'SELECT id, mail AS email, date AS joined, "spam" AS status FROM spam_emails{where} ORDER BY id DESC LIMIT ? OFFSET ?', (*params, limit, offset)).fetchall()
+                return {"items": [dict(r) for r in rows], "columns": ["id", "email", "status", "joined"], "page": page, "limit": limit, "total": total, "pages": max(1, math.ceil(total/limit))}
+        raise APIError(404, "not_found")
+
+    def project_data_get(self, query: dict) -> dict:
+        db_path = (PRIMARY_DB_DIR / "project_data.db").resolve()
+        if PRIMARY_DB_DIR.resolve() not in db_path.parents or not db_path.is_file():
+            raise APIError(503, "project_data_missing", "Missing db/project_data.db.")
+        with closing(sqlite3.connect(f"file:{db_path.as_posix()}?mode=ro", uri=True, timeout=15)) as db:
+            db.row_factory = sqlite3.Row
+            tables = [row[0] for row in db.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name"
+            ).fetchall()]
+            selected = (query.get("table") or [""])[0]
+            if not selected:
+                return {"tables": [{"name": name, "count": db.execute(
+                    'SELECT COUNT(*) FROM "' + name.replace('"', '""') + '"'
+                ).fetchone()[0]} for name in tables]}
+            if selected not in tables:
+                raise APIError(404, "project_data_table_not_found")
+            quoted = '"' + selected.replace('"', '""') + '"'
+            columns = [dict(row) for row in db.execute(f"PRAGMA table_info({quoted})")]
+            # Even the owner-only raw table browser must never expose authentication
+            # secrets or device/network identifiers.
+            sensitive_columns = {
+                "password", "password_hash", "login_token", "registration_token",
+                "user_seller_chat_token", "reset_token", "access_token", "refresh_token",
+                "secret", "api_key", "last_ip", "last_ip_date", "user_device_data",
+                "device_id", "session_token",
+            }
+            columns = [column for column in columns
+                       if column["name"].casefold() not in sensitive_columns]
+            try:
+                page = max(1, min(100000, int((query.get("page") or ["1"])[0])))
+            except ValueError as exc:
+                raise APIError(400, "invalid_pagination") from exc
+            search = (query.get("q") or [""])[0].strip().casefold()
+            searchable = [c["name"] for c in columns if "BLOB" not in str(c["type"]).upper()]
+            where, params = "", []
+            if search and searchable:
+                where = " WHERE " + " OR ".join(
+                    'lower(CAST("' + name.replace('"', '""') + '" AS TEXT)) LIKE ?'
+                    for name in searchable
+                )
+                params = [f"%{search}%"] * len(searchable)
+            total = db.execute(f"SELECT COUNT(*) FROM {quoted}{where}", params).fetchone()[0]
+            rows = db.execute(f"SELECT * FROM {quoted}{where} LIMIT ? OFFSET ?",
+                              (*params, PAGE_SIZE, (page - 1) * PAGE_SIZE)).fetchall()
+            items = []
+            for row in rows:
+                item = {}
+                for col in columns:
+                    value = row[col["name"]]
+                    if isinstance(value, bytes):
+                        value = f"[BLOB {len(value)} bytes]"
+                    item[col["name"]] = value
+                items.append(item)
+        return {"tables": [{"name": name} for name in tables], "table": selected,
+                "columns": [c["name"] for c in columns], "items": items,
+                "page": page, "limit": PAGE_SIZE, "total": total,
+                "pages": max(1, math.ceil(total / PAGE_SIZE))}
 
     def backup_primary_database(self, module: str, db_path: Path) -> None:
         backup_dir = DATA_DIR / "primary-database-backups"
@@ -1177,18 +1346,17 @@ class Handler(BaseHTTPRequestHandler):
         if auth["role"] != "super":
             raise APIError(403, "forbidden")
         with connect() as db:
-            row = db.execute("SELECT password_hash,salt FROM admins WHERE id=?", (auth["id"],)).fetchone()
-            password = str(data.get("password", ""))[:1024]
-            if not row or not password_matches(password, row["salt"], row["password_hash"]):
+            row = db.execute("SELECT code_hash,salt FROM profit_access WHERE id=1").fetchone()
+            code = str(data.get("code", ""))[:256]
+            valid = bool(row and password_matches(code, row["salt"], row["code_hash"]))
+            if not valid:
                 audit(db, auth["id"], auth["username"], "reauth_failed", "profit", ip=self.ip())
-                valid = False
             else:
-                valid = True
                 unlocked_until = int(time.time()) + 300
                 db.execute("UPDATE sessions SET profit_until=? WHERE id=?", (unlocked_until, auth["sid"]))
                 audit(db, auth["id"], auth["username"], "reauth_success", "profit", ip=self.ip())
         if not valid:
-            raise APIError(401, "invalid_credentials", "Неверный пароль.")
+            raise APIError(401, "invalid_credentials", "\u041d\u0435\u0432\u0435\u0440\u043d\u044b\u0439 \u043a\u043e\u0434 \u0434\u043e\u0441\u0442\u0443\u043f\u0430.")
         self.send_json(200, {"ok": True, "expires_in": 300})
 
     def record_write(self, module: str, data: dict, auth: dict) -> None:
@@ -1310,6 +1478,10 @@ class Handler(BaseHTTPRequestHandler):
                 row = db.execute("SELECT * FROM admins WHERE id=?", (item_id,)).fetchone()
                 if not row:
                     raise APIError(404, "not_found")
+                if row["role"] == "super" and (role != "super" or status != "active"):
+                    raise APIError(403, "owner_protected", "The owner account cannot be demoted or blocked.")
+                if row["role"] == "admin" and role == "super":
+                    raise APIError(403, "owner_only", "Only one super-admin owner is allowed.")
                 before = {"login": row["username"], "email": row["email"], "role": row["role"], "status": row["status"]}
                 updates = {}
                 if username:
@@ -1339,6 +1511,8 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_json(200, {"ok": True})
         if not username or not email:
             raise APIError(400, "missing_fields", "Укажите логин и email.")
+        if role == "super":
+            raise APIError(403, "owner_only", "A second super-admin cannot be created.")
         password = str(data.get("password", ""))
         if len(password) < 12:
             raise APIError(400, "weak_password", "Пароль должен содержать минимум 12 символов.")

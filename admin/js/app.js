@@ -92,9 +92,9 @@ const GROUPS=[
  {t:'Информация обо всём',i:'🧭',d:'Пользователи, лоты и магазины',page:'info',items:['users','lots','shops']},
  {t:'Добавление контента',i:'✨',d:'Баннеры, новости и курсы валют',page:'content',items:['banners','news','currencies']}
 ];
-const ADMIN_HOME=['users','lots','news','complaints','support','shops'];
+const ADMIN_HOME=['users','lots','news','complaints','support','shops','currencies','newsletter'];
 const MODULE_PAGES={promotion:'finance',profit:'finance',refunds:'finance',stats:'analytics',transactions:'analytics',
- newsletter:'system',journal:'system',admins:'system',scan:'system',bulk:'system',assistant:'system'};
+ newsletter:'system',journal:'system',admins:'system',scan:'system',bulk:'system',assistant:'system',project_data:'system'};
 function moduleTiles(keys){return h('div',{class:'tiles'},keys.filter(k=>API.can(k)).map(k=>{
  const s=SEC[k];return h('button',{class:'tile',onclick:()=>location.href='/admin/'+(GROUPS.find(g=>g.items.includes(k))?.page||MODULE_PAGES[k]||'')+'/index.html?module='+encodeURIComponent(k)},h('span',{class:'ic'},s.i),s.t)
 }))}
@@ -131,42 +131,60 @@ function route(){
 }
 function open(k){
  if(k==='profit')return unlockProfit();
- const box=h('div');shell(SEC[k].t,box);({bulk,assistant,profit,stats,scan,newsletter}[k]||listView)(k,box)
+
+ const box=h('div');shell(SEC[k].t,box);({bulk,assistant,profit,stats,scan}[k]||listView)(k,box)
 }
 async function unlockProfit(){
- formDlg('Подтвердите пароль',{password:'password'},{password:'Пароль'}, {},async data=>{
-  try{await API.reauthenticate(data.password);const box=h('div');shell(SEC.profit.t,box);profit('profit',box)}
+ formDlg('\u0412\u0432\u0435\u0434\u0438\u0442\u0435 \u043e\u0442\u0434\u0435\u043b\u044c\u043d\u044b\u0439 \u043a\u043e\u0434 \u0434\u043e\u0441\u0442\u0443\u043f\u0430',{code:'password'},{code:'\u041a\u043e\u0434 \u0434\u043e\u0441\u0442\u0443\u043f\u0430'}, {},async data=>{
+  try{await API.reauthenticate(data.code);const box=h('div');shell(SEC.profit.t,box);profit('profit',box)}
   catch(e){if(e.message.includes('Сессия'))fail(e);else toast(e.message);return false}
  })
 }
 
-const GOOD=/^(active|done|accepted)$/,BAD=/^(blocked|rejected|new|pending)$/;
-const cell=v=>typeof v=='boolean'?(v?'✓':'—'):typeof v=='string'&&(GOOD.test(v)||BAD.test(v))?h('span',{class:'bd '+(GOOD.test(v)?'ok':'bad')},v):v;
+const GOOD=/^(active|done|accepted)$/i,BAD=/^(blocked|rejected|new|pending)$/i;
+const cell=v=>{
+ if(typeof v==='boolean')return v?'\u2713':'\u2014';
+ if(typeof v==='string'&&['none','null','undefined'].includes(v.trim().toLowerCase()))return '\u2014';
+ if(typeof v==='string'&&v.startsWith('data:image/'))return h('img',{class:'table-thumb',src:v,alt:'\u0418\u0437\u043e\u0431\u0440\u0430\u0436\u0435\u043d\u0438\u0435',loading:'lazy'});
+ if(typeof v==='string'&&(GOOD.test(v)||BAD.test(v)))return h('span',{class:'bd '+(GOOD.test(v)?'ok':'bad')},v);
+ if(typeof v==='string'&&v.length>90)return h('span',{title:v},v.slice(0,87)+'\u2026');
+ return v==null||v===''?'\u2014':v;
+};
 
 function listView(k,box){
  const s=SEC[k],co=s.co||k,d=st.d[k]??={q:'',page:1,f:{},from:''};
- const tw=h('div',{class:'tw'}),pg=h('div',{class:'pg'}),bar=h('div',{class:'bar'});
- const load=async()=>{try{draw(await API.list(co,{...d,dk:s.dk}))}catch(e){fail(e)}};
+ const tw=h('div',{class:'tw'}),pg=h('div',{class:'pg'}),bar=h('div',{class:'bar'});let categoryFilter=null;
+ const load=async()=>{try{const r=await API.list(co,{...d,dk:s.dk});if(k==='lots'){d.categories=r.categories||d.categories||[];if(categoryFilter){const current=d.category||'';categoryFilter.replaceChildren(h('option',{value:''},'\u0412\u0441\u0435 \u043a\u0430\u0442\u0435\u0433\u043e\u0440\u0438\u0438'),...(d.categories||[]).map(v=>h('option',{value:v.name},v.name+' ('+v.count+')')));categoryFilter.value=current}}draw(r)}catch(e){fail(e)}};
  const btn=(t,on,fn)=>h('button',{class:'btn t',disabled:!on,onclick:fn},t);
  const edit=r=>formDlg('Запись #'+r.id,s.e,s.c,r,async p=>{try{await API.save(co,r.id,p);toast('Сохранено');load()}catch(e){fail(e);return false}});
- const detail=r=>{if(k==='users')userDetail(r);else edit(r)};
+ const detail=r=>{
+  if(['users','shops','lots'].includes(k)){
+   const title=k==='users'?'\u041f\u043e\u043b\u044c\u0437\u043e\u0432\u0430\u0442\u0435\u043b\u044c':k==='shops'?'\u041c\u0430\u0433\u0430\u0437\u0438\u043d':'\u041b\u043e\u0442';
+   const fields=Object.entries(r).filter(([key,value])=>value!=null&&value!==''&&String(value).toLowerCase()!=='none'&&!['null','undefined'].includes(String(value).toLowerCase())).map(([key,value])=>{
+    const label=s.c[key]||key;
+    if(typeof value==='string'&&value.startsWith('data:image/'))return h('div',{class:'record-media'},h('b',{},label),h('img',{class:'record-image',src:value,alt:label,loading:'lazy'}));
+    let shown=value;
+    if(typeof value==='string'&&/^[\[{]/.test(value)){try{shown=JSON.stringify(JSON.parse(value),null,2)}catch{}}
+    return h('div',{class:'pd-field'},h('b',{},label),h('span',{},String(shown)));
+   });
+   const d=dlg(h('div',{class:'record-head'},h('h3',{},title+' \u00b7 #'+r.id),h('span',{class:'mt'},k==='shops'?(r.name||'')+' '+(r.surname||'')+' \u00b7 \u0432\u043b\u0430\u0434\u0435\u043b\u0435\u0446':'\u041f\u043e\u0434\u0440\u043e\u0431\u043d\u0430\u044f \u0438\u043d\u0444\u043e\u0440\u043c\u0430\u0446\u0438\u044f')),
+    h('div',{class:'pd-detail'},fields.length?fields:h('p',{class:'mt'},'\u041d\u0435\u0442 \u0437\u0430\u043f\u043e\u043b\u043d\u0435\u043d\u043d\u044b\u0445 \u0434\u043e\u043f\u043e\u043b\u043d\u0438\u0442\u0435\u043b\u044c\u043d\u044b\u0445 \u043f\u043e\u043b\u0435\u0439.')),
+    h('div',{class:'row'},h('button',{class:'btn t',onclick:()=>d.close()},'\u0417\u0430\u043a\u0440\u044b\u0442\u044c')));
+   d.classList.add('record-dialog');
+  }else if(s.e)edit(r)
+ };
  const run=(label,r,fn)=>async()=>{if(await ask(label+' · запись #'+r.id+'?'))try{await fn();toast('Готово');load()}catch(e){fail(e)}};
- const draw=r=>{const cols=Object.keys(s.c),has=s.act||s.del||s.logs;d.page=Math.min(d.page,r.pages);
+ const draw=r=>{const cols=Object.keys(s.c).filter(c=>(!r.columns||r.columns.includes(c))&&!(s.hide||[]).includes(c)),has=s.act||s.del||s.logs;d.page=Math.min(d.page,r.pages);
   tw.replaceChildren(h('table',{},h('thead',{},h('tr',{},cols.map(c=>h('th',{},s.c[c])),has&&h('th',{},''))),
-   h('tbody',{},r.rows.length?r.rows.map(r=>h('tr',{class:s.e||k=='users'?'cl':'',onclick:(s.e||k=='users')&&(()=>detail(r))},cols.map(c=>h('td',{},cell(r[c]))),
+   h('tbody',{},r.rows.length?r.rows.map(r=>h('tr',{class:s.e||['users','shops','lots'].includes(k)?'cl':'',onclick:(s.e||['users','shops','lots'].includes(k))&&(()=>detail(r))},cols.map(c=>h('td',{},cell(r[c]))),
     has&&h('td',{onclick:e=>e.stopPropagation()},(s.act||[]).map(([a,l])=>h('button',{class:'btn t sm',onclick:run(l,r,()=>API.act(co,r.id,a))},l)),
      s.del&&h('button',{class:'btn t sm',onclick:run('Удалить',r,()=>API.del(co,r.id))},'Удалить'),
      s.logs&&h('button',{class:'btn t sm',onclick:()=>API.downloadAdminLog(r.id).catch(fail)},'TXT')))):
     h('tr',{},h('td',{colspan:cols.length+1},'Ничего не найдено. Измените поиск или фильтры.')))));
   pg.replaceChildren(btn('←',d.page>1,()=>{d.page--;load()}),h('span',{},`стр. ${d.page} из ${r.pages} · всего ${r.total}`),btn('→',d.page<r.pages,()=>{d.page++;load()}))};
- if(k==='users'){
-  d.field=d.field||'nick';
-  const field=h('select',{'aria-label':'Искать по'},[['nick','Никнейму'],['email','Почте'],['id','ID пользователя'],['shop','Магазину']].map(([v,l])=>h('option',{value:v},l)));
-  field.value=d.field;field.onchange=()=>{d.field=field.value;d.page=1;load()};bar.append(field)
- }
  if(s.q){const q=h('input',{type:'search',placeholder:'Поиск: '+s.q,'aria-label':'Поиск'});q.value=d.q;let t;
   q.oninput=()=>{clearTimeout(t);t=setTimeout(()=>{d.q=q.value;d.page=1;load()},250)};bar.append(q)}
- for(const[fk,o]of Object.entries(s.f||{})){const f=h('select',{'aria-label':s.c[fk]},h('option',{value:''},s.c[fk]+': все'),o.map(v=>h('option',{},v)));
+ if(k==='lots'){categoryFilter=h('select',{'aria-label':'\u041a\u0430\u0442\u0435\u0433\u043e\u0440\u0438\u044f \u043b\u043e\u0442\u043e\u0432'},h('option',{value:''},'\u0412\u0441\u0435 \u043a\u0430\u0442\u0435\u0433\u043e\u0440\u0438\u0438'));categoryFilter.value=d.category||'';categoryFilter.onchange=()=>{d.category=categoryFilter.value;d.page=1;load()};bar.append(categoryFilter)} for(const[fk,o]of Object.entries(s.f||{})){const f=h('select',{'aria-label':s.c[fk]},h('option',{value:''},s.c[fk]+': все'),o.map(v=>h('option',{},v)));
   f.value=d.f[fk]||'';f.onchange=()=>{d.f[fk]=f.value;d.page=1;load()};bar.append(f)}
  if(s.dk){const f=h('input',{type:'date','aria-label':'С даты',title:'С даты'});f.value=d.from;f.onchange=()=>{d.from=f.value;d.page=1;load()};bar.append(f)}
  if(s.a)bar.append(h('button',{class:'btn',onclick:()=>formDlg('Добавить',s.a,s.c,k==='admins'?{sections:ADMIN_HOME.join(',')}:(s.defaults||{}),async p=>{try{await API.add(co,p);toast('Добавлено');load()}catch(e){fail(e);return false}})},'+ Добавить'));
@@ -174,6 +192,30 @@ function listView(k,box){
   const csv=[cols.map(c=>s.c[c]),...rows.map(r=>cols.map(c=>r[c]))].map(r=>r.map(v=>'"'+String(v).replaceAll('"','""')+'"').join(',')).join('\n');
   const a=h('a',{href:URL.createObjectURL(new Blob(['\ufeff'+csv],{type:'text/csv'})),download:co+'.csv'});a.click();URL.revokeObjectURL(a.href)}catch(e){fail(e)}}},'Экспорт CSV'));
  box.append(bar,tw,pg);load();
+}
+
+async function projectDataView(box){
+ const bar=h('div',{class:'bar'}),area=h('div'),pager=h('div',{class:'pg'});
+ const tableSelect=h('select',{'aria-label':'\u0422\u0430\u0431\u043b\u0438\u0446\u0430 Project Data'}),search=h('input',{type:'search',placeholder:'\u041f\u043e\u0438\u0441\u043a \u043f\u043e \u0432\u0441\u0435\u043c \u043f\u043e\u043b\u044f\u043c'});
+ const state={table:'',q:'',page:1,tables:[]};
+ const showDetail=row=>{
+  const fields=Object.entries(row).map(([key,value])=>h('div',{class:'pd-field'},h('b',{},key),h('span',{},value===null?'NULL':String(value))));
+  const d=dlg(h('h3',{},'\u0417\u0430\u043f\u0438\u0441\u044c - '+state.table+' - #'+(row.id??'?')),
+   h('div',{class:'pd-detail'},fields),
+   h('div',{class:'row'},h('button',{class:'btn t',onclick:()=>d.close()},'\u0417\u0430\u043a\u0440\u044b\u0442\u044c')));
+ };
+ const load=async()=>{try{
+  const r=await API.list('project_data',{table:state.table,q:state.q,page:state.page});
+  if(!state.table){state.tables=r.tables;tableSelect.replaceChildren(...r.tables.map(t=>h('option',{value:t.name},t.name+' | '+t.count)));state.table=r.tables[0]?.name||'';tableSelect.value=state.table;if(state.table)return load();}
+  const cols=r.columns,visible=cols.slice(0,7);
+  area.replaceChildren(h('p',{class:'mt'},'\u0422\u0430\u0431\u043b\u0438\u0446\u0430: '+state.table+' | \u043f\u043e\u043b\u0435\u0439: '+cols.length+' | \u0437\u0430\u043f\u0438\u0441\u0435\u0439: '+r.total+' | \u041d\u0430\u0436\u043c\u0438\u0442\u0435 \u043d\u0430 \u0441\u0442\u0440\u043e\u043a\u0443, \u0447\u0442\u043e\u0431\u044b \u043f\u0440\u043e\u0441\u043c\u043e\u0442\u0440\u0435\u0442\u044c \u0432\u0441\u0435 \u043f\u043e\u043b\u044f.'),
+   h('div',{class:'tw'},h('table',{},h('thead',{},h('tr',{},visible.map(c=>h('th',{},c)),h('th',{},'\u0412\u0441\u0435 \u043f\u043e\u043b\u044f'))),
+    h('tbody',{},r.rows.length?r.rows.map(row=>h('tr',{class:'cl',onclick:()=>showDetail(row)},visible.map(c=>h('td',{},row[c]===null?'NULL':String(row[c]??''))),h('td',{},'\u041e\u0442\u043a\u0440\u044b\u0442\u044c >'))):h('tr',{},h('td',{colspan:visible.length+1},'\u0417\u0430\u043f\u0438\u0441\u0435\u0439 \u043d\u0435\u0442.'))))));
+  pager.replaceChildren(h('button',{class:'btn t',disabled:state.page<=1,onclick:()=>{state.page--;load()}},'Prev'),h('span',{},`\u0421\u0442\u0440. ${r.page||state.page} \u0438\u0437 ${r.pages} | \u0432\u0441\u0435\u0433\u043e ${r.total}`),h('button',{class:'btn t',disabled:state.page>=(r.pages||1),onclick:()=>{state.page++;load()}},'Next'));
+ }catch(e){fail(e)}};
+ tableSelect.onchange=()=>{state.table=tableSelect.value;state.page=1;load()};
+ let timer;search.oninput=()=>{clearTimeout(timer);timer=setTimeout(()=>{state.q=search.value;state.page=1;load()},250)};
+ bar.append(tableSelect,search);box.append(bar,area,pager);load();
 }
 
 async function stats(k,box){try{const r=await API.stats();
