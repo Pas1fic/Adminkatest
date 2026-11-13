@@ -82,4 +82,4 @@ py -3 app.py
 4. HTML новостей сохраняется, но безопасный публичный рендеринг/санитизация и публикация на витрине не реализованы.
 5. Backend на `http.server` предназначен только для локального прототипа, не для production.
 
-Additional details about the isolated SQLite test databases: [TEST_DATABASES.md](TEST_DATABASES.md).
+Основные базы контента и подключение к ним описаны в [DATABASES.md](DATABASES.md).
