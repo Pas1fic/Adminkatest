@@ -15,6 +15,7 @@ import ssl
 import sys
 import time
 from email.message import EmailMessage
+from contextlib import closing
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -46,7 +47,7 @@ PRIMARY_DB_DIR = Path(os.environ.get("ADMIN_PRIMARY_DB_DIR", ROOT / "db")).resol
 MODULES = {
     "users", "lots", "shops", "news", "support", "complaints", "banners",
     "currencies", "newsletter", "transactions", "promotion", "refunds",
-    "profit", "stats", "audit", "admins", "scan", "bulk", "assistant",
+    "profit", "stats", "audit", "admins", "scan", "bulk", "assistant", "project_data",
 }
 ADMIN_MODULES = {"users", "lots", "shops", "news", "support", "complaints"}
 SUPER_MODULES = MODULES - ADMIN_MODULES
@@ -513,6 +514,11 @@ class Handler(BaseHTTPRequestHandler):
         if module not in MODULES:
             raise APIError(404, "not_found")
         require_module(auth, module)
+        if module == "project_data":
+            if auth["role"] != "super":
+                raise APIError(403, "forbidden", "Project Data is available to the owner account only.")
+            query = parse_qs(urlparse(self.path).query)
+            return self.send_json(200, self.project_data_get(query))
         if module in PRIMARY_DATABASES:
             query = parse_qs(urlparse(self.path).query)
             return self.send_json(200, self.primary_database_get(module, query))
@@ -621,6 +627,54 @@ class Handler(BaseHTTPRequestHandler):
         db.close()
         return {"items": items, "page": page, "limit": limit, "total": total,
                 "pages": max(1, math.ceil(total / limit))}
+
+    def project_data_get(self, query: dict) -> dict:
+        db_path = (PRIMARY_DB_DIR / "project_data.db").resolve()
+        if PRIMARY_DB_DIR.resolve() not in db_path.parents or not db_path.is_file():
+            raise APIError(503, "project_data_missing", "Missing db/project_data.db.")
+        with closing(sqlite3.connect(f"file:{db_path.as_posix()}?mode=ro", uri=True, timeout=15)) as db:
+            db.row_factory = sqlite3.Row
+            tables = [row[0] for row in db.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name"
+            ).fetchall()]
+            selected = (query.get("table") or [""])[0]
+            if not selected:
+                return {"tables": [{"name": name, "count": db.execute(
+                    'SELECT COUNT(*) FROM "' + name.replace('"', '""') + '"'
+                ).fetchone()[0]} for name in tables]}
+            if selected not in tables:
+                raise APIError(404, "project_data_table_not_found")
+            quoted = '"' + selected.replace('"', '""') + '"'
+            columns = [dict(row) for row in db.execute(f"PRAGMA table_info({quoted})")]
+            try:
+                page = max(1, min(100000, int((query.get("page") or ["1"])[0])))
+            except ValueError as exc:
+                raise APIError(400, "invalid_pagination") from exc
+            search = (query.get("q") or [""])[0].strip().casefold()
+            searchable = [c["name"] for c in columns if "BLOB" not in str(c["type"]).upper()]
+            where, params = "", []
+            if search and searchable:
+                where = " WHERE " + " OR ".join(
+                    'lower(CAST("' + name.replace('"', '""') + '" AS TEXT)) LIKE ?'
+                    for name in searchable
+                )
+                params = [f"%{search}%"] * len(searchable)
+            total = db.execute(f"SELECT COUNT(*) FROM {quoted}{where}", params).fetchone()[0]
+            rows = db.execute(f"SELECT * FROM {quoted}{where} LIMIT ? OFFSET ?",
+                              (*params, PAGE_SIZE, (page - 1) * PAGE_SIZE)).fetchall()
+            items = []
+            for row in rows:
+                item = {}
+                for col in columns:
+                    value = row[col["name"]]
+                    if isinstance(value, bytes):
+                        value = f"[BLOB {len(value)} bytes]"
+                    item[col["name"]] = value
+                items.append(item)
+        return {"tables": [{"name": name} for name in tables], "table": selected,
+                "columns": [c["name"] for c in columns], "items": items,
+                "page": page, "limit": PAGE_SIZE, "total": total,
+                "pages": max(1, math.ceil(total / PAGE_SIZE))}
 
     def backup_primary_database(self, module: str, db_path: Path) -> None:
         backup_dir = DATA_DIR / "primary-database-backups"
@@ -1310,6 +1364,10 @@ class Handler(BaseHTTPRequestHandler):
                 row = db.execute("SELECT * FROM admins WHERE id=?", (item_id,)).fetchone()
                 if not row:
                     raise APIError(404, "not_found")
+                if row["role"] == "super" and (role != "super" or status != "active"):
+                    raise APIError(403, "owner_protected", "The owner account cannot be demoted or blocked.")
+                if row["role"] == "admin" and role == "super":
+                    raise APIError(403, "owner_only", "Only one super-admin owner is allowed.")
                 before = {"login": row["username"], "email": row["email"], "role": row["role"], "status": row["status"]}
                 updates = {}
                 if username:
@@ -1339,6 +1397,8 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_json(200, {"ok": True})
         if not username or not email:
             raise APIError(400, "missing_fields", "Укажите логин и email.")
+        if role == "super":
+            raise APIError(403, "owner_only", "A second super-admin cannot be created.")
         password = str(data.get("password", ""))
         if len(password) < 12:
             raise APIError(400, "weak_password", "Пароль должен содержать минимум 12 символов.")

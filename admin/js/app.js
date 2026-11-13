@@ -94,7 +94,7 @@ const GROUPS=[
 ];
 const ADMIN_HOME=['users','lots','news','complaints','support','shops'];
 const MODULE_PAGES={promotion:'finance',profit:'finance',refunds:'finance',stats:'analytics',transactions:'analytics',
- newsletter:'system',journal:'system',admins:'system',scan:'system',bulk:'system',assistant:'system'};
+ newsletter:'system',journal:'system',admins:'system',scan:'system',bulk:'system',assistant:'system',project_data:'system'};
 function moduleTiles(keys){return h('div',{class:'tiles'},keys.filter(k=>API.can(k)).map(k=>{
  const s=SEC[k];return h('button',{class:'tile',onclick:()=>location.href='/admin/'+(GROUPS.find(g=>g.items.includes(k))?.page||MODULE_PAGES[k]||'')+'/index.html?module='+encodeURIComponent(k)},h('span',{class:'ic'},s.i),s.t)
 }))}
@@ -131,6 +131,7 @@ function route(){
 }
 function open(k){
  if(k==='profit')return unlockProfit();
+ if(k==='project_data'){const box=h('div');shell(SEC[k].t,box);return projectDataView(box)}
  const box=h('div');shell(SEC[k].t,box);({bulk,assistant,profit,stats,scan,newsletter}[k]||listView)(k,box)
 }
 async function unlockProfit(){
@@ -174,6 +175,30 @@ function listView(k,box){
   const csv=[cols.map(c=>s.c[c]),...rows.map(r=>cols.map(c=>r[c]))].map(r=>r.map(v=>'"'+String(v).replaceAll('"','""')+'"').join(',')).join('\n');
   const a=h('a',{href:URL.createObjectURL(new Blob(['\ufeff'+csv],{type:'text/csv'})),download:co+'.csv'});a.click();URL.revokeObjectURL(a.href)}catch(e){fail(e)}}},'Экспорт CSV'));
  box.append(bar,tw,pg);load();
+}
+
+async function projectDataView(box){
+ const bar=h('div',{class:'bar'}),area=h('div'),pager=h('div',{class:'pg'});
+ const tableSelect=h('select',{'aria-label':'\u0422\u0430\u0431\u043b\u0438\u0446\u0430 Project Data'}),search=h('input',{type:'search',placeholder:'\u041f\u043e\u0438\u0441\u043a \u043f\u043e \u0432\u0441\u0435\u043c \u043f\u043e\u043b\u044f\u043c'});
+ const state={table:'',q:'',page:1,tables:[]};
+ const showDetail=row=>{
+  const fields=Object.entries(row).map(([key,value])=>h('div',{class:'pd-field'},h('b',{},key),h('span',{},value===null?'NULL':String(value))));
+  const d=dlg(h('h3',{},'\u0417\u0430\u043f\u0438\u0441\u044c - '+state.table+' - #'+(row.id??'?')),
+   h('div',{class:'pd-detail'},fields),
+   h('div',{class:'row'},h('button',{class:'btn t',onclick:()=>d.close()},'\u0417\u0430\u043a\u0440\u044b\u0442\u044c')));
+ };
+ const load=async()=>{try{
+  const r=await API.list('project_data',{table:state.table,q:state.q,page:state.page});
+  if(!state.table){state.tables=r.tables;tableSelect.replaceChildren(...r.tables.map(t=>h('option',{value:t.name},t.name+' | '+t.count)));state.table=r.tables[0]?.name||'';tableSelect.value=state.table;if(state.table)return load();}
+  const cols=r.columns,visible=cols.slice(0,7);
+  area.replaceChildren(h('p',{class:'mt'},'\u0422\u0430\u0431\u043b\u0438\u0446\u0430: '+state.table+' | \u043f\u043e\u043b\u0435\u0439: '+cols.length+' | \u0437\u0430\u043f\u0438\u0441\u0435\u0439: '+r.total+' | \u041d\u0430\u0436\u043c\u0438\u0442\u0435 \u043d\u0430 \u0441\u0442\u0440\u043e\u043a\u0443, \u0447\u0442\u043e\u0431\u044b \u043f\u0440\u043e\u0441\u043c\u043e\u0442\u0440\u0435\u0442\u044c \u0432\u0441\u0435 \u043f\u043e\u043b\u044f.'),
+   h('div',{class:'tw'},h('table',{},h('thead',{},h('tr',{},visible.map(c=>h('th',{},c)),h('th',{},'\u0412\u0441\u0435 \u043f\u043e\u043b\u044f'))),
+    h('tbody',{},r.rows.length?r.rows.map(row=>h('tr',{class:'cl',onclick:()=>showDetail(row)},visible.map(c=>h('td',{},row[c]===null?'NULL':String(row[c]??''))),h('td',{},'\u041e\u0442\u043a\u0440\u044b\u0442\u044c >'))):h('tr',{},h('td',{colspan:visible.length+1},'\u0417\u0430\u043f\u0438\u0441\u0435\u0439 \u043d\u0435\u0442.'))))));
+  pager.replaceChildren(h('button',{class:'btn t',disabled:state.page<=1,onclick:()=>{state.page--;load()}},'Prev'),h('span',{},`\u0421\u0442\u0440. ${r.page||state.page} \u0438\u0437 ${r.pages} | \u0432\u0441\u0435\u0433\u043e ${r.total}`),h('button',{class:'btn t',disabled:state.page>=(r.pages||1),onclick:()=>{state.page++;load()}},'Next'));
+ }catch(e){fail(e)}};
+ tableSelect.onchange=()=>{state.table=tableSelect.value;state.page=1;load()};
+ let timer;search.oninput=()=>{clearTimeout(timer);timer=setTimeout(()=>{state.q=search.value;state.page=1;load()},250)};
+ bar.append(tableSelect,search);box.append(bar,area,pager);load();
 }
 
 async function stats(k,box){try{const r=await API.stats();

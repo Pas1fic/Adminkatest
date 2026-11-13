@@ -25,5 +25,6 @@ scan:{t:'Сканирование БД',i:'🔍'},
 admins:{t:'Администраторы',i:'🛡️',q:'логин, email',c:{id:'ID',login:'Логин',email:'Email',role:'Роль',status:'Статус',sections:'Разделы'},a:{login:'',email:'email',password:'password',role:['admin','super'],sections:''},e:{login:'',email:'email',role:['admin','super'],status:['active','blocked'],sections:''},f:{role:['admin','super']},logs:1},
 currencies:{t:'Курсы валют',i:'💱',c:{id:'ID',code:'Валюта',rate:'Единиц за 1 USD',updated:'Обновлено'},e:{rate:'number'},a:{code:'',rate:'number'},del:1},
 newsletter:{t:'Подписчики рассылки',i:'✉️',q:'почта',c:{id:'ID',email:'Почта',status:'Подписка',joined:'Дата подписки'},f:{status:['active','unsubscribed']}},
-transactions:{t:'Лог транзакций',i:'🧾',q:'пользователь, операция, ID',c:{id:'ID',date:'Дата',user:'Пользователь',type:'Операция',amount:'Сумма',status:'Статус'},f:{status:['success','pending','failed']}}
+transactions:{t:'Лог транзакций',i:'🧾',q:'пользователь, операция, ID',c:{id:'ID',date:'Дата',user:'Пользователь',type:'Операция',amount:'Сумма',status:'Статус'},f:{status:['success','pending','failed']}},
+project_data:{t:'Project Data',i:'DB'}
 };
